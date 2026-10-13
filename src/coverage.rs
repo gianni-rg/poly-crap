@@ -347,7 +347,7 @@ fn parse_jacoco(raw: &str) -> Result<CoverageMap> {
     let mut source_file: Option<PathBuf> = None;
     let mut output = CoverageMap::new();
     while let Some(event) = read_xml_event(&mut reader, "JaCoCo")? {
-        handle_jacoco_event(event, &reader, &mut package, &mut source_file, &mut output)?;
+        handle_jacoco_event(event, &mut package, &mut source_file, &mut output)?;
     }
     finish_jacoco_report(output)
 }
@@ -368,17 +368,16 @@ fn read_xml_event<'a>(reader: &mut Reader<&'a [u8]>, format: &str) -> Result<Opt
 
 fn handle_jacoco_event(
     event: Event<'_>,
-    reader: &Reader<&[u8]>,
     package: &mut String,
     source_file: &mut Option<PathBuf>,
     output: &mut CoverageMap,
 ) -> Result<()> {
     match event {
-        Event::Start(event) => handle_jacoco_start(&event, reader, package, source_file),
-        Event::Empty(event) if event.name().as_ref() == b"line" => {
-            add_jacoco_line(&event, reader, source_file, output)
+        Event::Start(event) => handle_jacoco_start(&event, package, source_file),
+        Event::Empty(event) if event.name().as_ref() == "line" => {
+            add_jacoco_line(&event, source_file, output)
         }
-        Event::End(event) if event.name().as_ref() == b"sourcefile" => {
+        Event::End(event) if event.name().as_ref() == "sourcefile" => {
             *source_file = None;
             Ok(())
         }
@@ -388,26 +387,20 @@ fn handle_jacoco_event(
 
 fn handle_jacoco_start(
     event: &BytesStart<'_>,
-    reader: &Reader<&[u8]>,
     package: &mut String,
     source_file: &mut Option<PathBuf>,
 ) -> Result<()> {
-    if event.name().as_ref() == b"package" {
-        *package = attribute(event, b"name", reader)?.unwrap_or_default();
+    if event.name().as_ref() == "package" {
+        *package = attribute(event, "name")?.unwrap_or_default();
     }
-    if event.name().as_ref() == b"sourcefile" {
-        *source_file = Some(jacoco_source_path(event, reader, package)?);
+    if event.name().as_ref() == "sourcefile" {
+        *source_file = Some(jacoco_source_path(event, package)?);
     }
     Ok(())
 }
 
-fn jacoco_source_path(
-    event: &BytesStart<'_>,
-    reader: &Reader<&[u8]>,
-    package: &str,
-) -> Result<PathBuf> {
-    let name = attribute(event, b"name", reader)?
-        .ok_or_else(|| anyhow!("JaCoCo sourcefile has no name"))?;
+fn jacoco_source_path(event: &BytesStart<'_>, package: &str) -> Result<PathBuf> {
+    let name = attribute(event, "name")?.ok_or_else(|| anyhow!("JaCoCo sourcefile has no name"))?;
     if package.is_empty() {
         Ok(portable_path(&name))
     } else {
@@ -417,14 +410,13 @@ fn jacoco_source_path(
 
 fn add_jacoco_line(
     event: &BytesStart<'_>,
-    reader: &Reader<&[u8]>,
     source_file: &Option<PathBuf>,
     output: &mut CoverageMap,
 ) -> Result<()> {
     let path = source_file
         .as_ref()
         .ok_or_else(|| anyhow!("JaCoCo line appeared outside sourcefile"))?;
-    let (line, missed, covered) = jacoco_line_numbers(event, reader)?;
+    let (line, missed, covered) = jacoco_line_numbers(event)?;
     if missed + covered > 0 {
         output
             .entry(path.clone())
@@ -439,10 +431,10 @@ fn add_jacoco_line(
     Ok(())
 }
 
-fn jacoco_line_numbers(event: &BytesStart<'_>, reader: &Reader<&[u8]>) -> Result<(u64, u64, u64)> {
-    let line = required_number(event, b"nr", reader)?;
-    let missed = required_number(event, b"mi", reader)?;
-    let covered = required_number(event, b"ci", reader)?;
+fn jacoco_line_numbers(event: &BytesStart<'_>) -> Result<(u64, u64, u64)> {
+    let line = required_number(event, "nr")?;
+    let missed = required_number(event, "mi")?;
+    let covered = required_number(event, "ci")?;
     Ok((line, missed, covered))
 }
 
@@ -452,7 +444,7 @@ fn parse_cobertura(raw: &str) -> Result<CoverageMap> {
     let mut source_file: Option<PathBuf> = None;
     let mut output = CoverageMap::new();
     while let Some(event) = read_xml_event(&mut reader, "Cobertura")? {
-        handle_cobertura_event(event, &reader, &mut source_file, &mut output)?;
+        handle_cobertura_event(event, &mut source_file, &mut output)?;
     }
     finish_cobertura_report(output)
 }
@@ -469,15 +461,14 @@ fn finish_cobertura_report(output: CoverageMap) -> Result<CoverageMap> {
 /// a region twice collapses the repeat.
 fn handle_cobertura_event(
     event: Event<'_>,
-    reader: &Reader<&[u8]>,
     source_file: &mut Option<PathBuf>,
     output: &mut CoverageMap,
 ) -> Result<()> {
     match event {
         Event::Start(event) | Event::Empty(event) => {
-            handle_cobertura_element(&event, reader, source_file, output)
+            handle_cobertura_element(&event, source_file, output)
         }
-        Event::End(event) if event.name().as_ref() == b"class" => {
+        Event::End(event) if event.name().as_ref() == "class" => {
             *source_file = None;
             Ok(())
         }
@@ -487,31 +478,29 @@ fn handle_cobertura_event(
 
 fn handle_cobertura_element(
     event: &BytesStart<'_>,
-    reader: &Reader<&[u8]>,
     source_file: &mut Option<PathBuf>,
     output: &mut CoverageMap,
 ) -> Result<()> {
     match event.name().as_ref() {
-        b"class" => {
-            *source_file = attribute(event, b"filename", reader)?.map(|name| portable_path(&name));
+        "class" => {
+            *source_file = attribute(event, "filename")?.map(|name| portable_path(&name));
             Ok(())
         }
-        b"line" => add_cobertura_line(event, reader, source_file, output),
+        "line" => add_cobertura_line(event, source_file, output),
         _ => Ok(()),
     }
 }
 
 fn add_cobertura_line(
     event: &BytesStart<'_>,
-    reader: &Reader<&[u8]>,
     source_file: &Option<PathBuf>,
     output: &mut CoverageMap,
 ) -> Result<()> {
     let path = source_file
         .as_ref()
         .ok_or_else(|| anyhow!("Cobertura line appeared outside class"))?;
-    let line = required_number(event, b"number", reader)?;
-    let hits = required_number(event, b"hits", reader)?;
+    let line = required_number(event, "number")?;
+    let hits = required_number(event, "hits")?;
     output
         .entry(path.clone())
         .or_insert_with(|| FileCoverage::new(CoverageBasis::Line))
@@ -524,35 +513,28 @@ fn add_cobertura_line(
     Ok(())
 }
 
-fn attribute(
-    event: &BytesStart<'_>,
-    name: &[u8],
-    reader: &Reader<&[u8]>,
-) -> Result<Option<String>> {
+fn attribute(event: &BytesStart<'_>, name: &str) -> Result<Option<String>> {
     for attribute in event.attributes() {
         let attribute = attribute.context("reading XML attribute")?;
         if attribute.key.as_ref() == name {
-            return decode_attribute(attribute, reader).map(Some);
+            return decode_attribute(attribute).map(Some);
         }
     }
     Ok(None)
 }
 
-fn decode_attribute(
-    attribute: quick_xml::events::attributes::Attribute<'_>,
-    reader: &Reader<&[u8]>,
-) -> Result<String> {
+fn decode_attribute(attribute: quick_xml::events::attributes::Attribute<'_>) -> Result<String> {
     attribute
-        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+        .normalized_value(XmlVersion::Implicit1_0)
         .context("decoding XML attribute")
         .map(std::borrow::Cow::into_owned)
 }
 
-fn required_number(event: &BytesStart<'_>, name: &[u8], reader: &Reader<&[u8]>) -> Result<u64> {
-    attribute(event, name, reader)?
-        .ok_or_else(|| anyhow!("coverage line is missing {}", String::from_utf8_lossy(name)))?
+fn required_number(event: &BytesStart<'_>, name: &str) -> Result<u64> {
+    attribute(event, name)?
+        .ok_or_else(|| anyhow!("coverage line is missing {name}"))?
         .parse::<u64>()
-        .with_context(|| format!("invalid coverage line {}", String::from_utf8_lossy(name)))
+        .with_context(|| format!("invalid coverage line {name}"))
 }
 
 fn portable_path(value: &str) -> PathBuf {
