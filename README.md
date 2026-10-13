@@ -25,7 +25,7 @@ Use it three ways:
 
 ### Installer
 
-macOS and Linux:
+macOS and Linux (shell):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -34,7 +34,7 @@ poly-crap-installer.sh \
   | sh
 ```
 
-Windows PowerShell:
+Windows (PowerShell):
 
 ```powershell
 $installer = 'https://github.com/drew-simmons/poly-crap/releases/' +

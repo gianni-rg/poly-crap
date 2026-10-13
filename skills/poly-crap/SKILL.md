@@ -114,7 +114,16 @@ That downloads and pipes the official cargo-dist installer to `sh`, prompting
 first (`--yes` skips it). The URL was confirmed to serve the real installer
 script, but the install itself was **not executed** during authoring — the
 binary was already present, and reinstalling over someone's copy is not a thing
-to do unasked. Equivalent by hand:
+to do unasked. This helper currently uses the shell installer. On Windows,
+install the binary with the PowerShell installer instead:
+
+```powershell
+$installer = 'https://github.com/drew-simmons/poly-crap/releases/' +
+  'latest/download/poly-crap-installer.ps1'
+irm $installer | iex
+```
+
+On macOS and Linux, the equivalent shell command is:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \

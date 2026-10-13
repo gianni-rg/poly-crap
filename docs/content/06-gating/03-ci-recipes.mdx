@@ -56,6 +56,19 @@ from the repository root so the paths in the file are repository-relative.
 Pin the installer to a release, as in [Install](/install), when you want the
 check to change only when you say so.
 
+The example above uses a Linux runner. On a Windows runner, install with
+PowerShell instead:
+
+```yaml
+      - name: Install poly-crap
+        shell: pwsh
+        run: |
+          $installer = 'https://github.com/drew-simmons/poly-crap/releases/' +
+            'latest/download/poly-crap-installer.ps1'
+          irm $installer | iex
+          "$HOME\.cargo\bin" >> $env:GITHUB_PATH
+```
+
 ## Pre-commit hook
 
 With [prek](https://github.com/j178/prek) or pre-commit, a local hook gates

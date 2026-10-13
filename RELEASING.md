@@ -1,8 +1,9 @@
 # Releasing
 
 Release Please manages versions, `Cargo.lock`, `CHANGELOG.md`, tags, and GitHub
-release notes from Conventional Commits. Cargo-dist 0.32.0 builds the macOS and
-Linux archives, checksums, and shell installer for each release tag.
+release notes from Conventional Commits. Cargo-dist 0.33.0 builds release
+archives and checksums for macOS, Linux, and 64-bit Windows (MSVC), along with
+shell and PowerShell installers for each release tag.
 
 ## One-time GitHub setup
 
@@ -40,6 +41,7 @@ Linux archives, checksums, and shell installer for each release tag.
      - `Format, lint, and package`
      - `Test (ubuntu-24.04)`
      - `Test (macos-14)`
+     - `Test (windows-2025)`
      - `plan`
 
 > [!IMPORTANT]
@@ -68,8 +70,9 @@ keeps implementation-only commit types out of the public changelog.
 3. Review its notes and merge the Release PR after CI passes.
 4. Release Please creates the version tag and a draft GitHub Release.
 5. Release Please starts cargo-dist for the tag. After all targets build,
-   cargo-dist attaches the archives, checksums, and `poly-crap-installer.sh`.
-   It then publishes the draft release.
+   cargo-dist attaches the platform archives, checksums, and the
+   `poly-crap-installer.sh` and `poly-crap-installer.ps1` installers. It then
+   publishes the draft release.
 6. The release workflow publishes the same version to crates.io.
 
 The repository starts at version `0.0.0`. Use `feat: initial release` for the

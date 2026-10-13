@@ -49,7 +49,7 @@ body:
     attributes:
       label: Environment
       description: Include your operating system, shell, and other useful versions.
-      placeholder: macOS 15, Zsh 5.9
+      placeholder: macOS 15, Zsh 5.9; Windows 11, PowerShell 7.x
 
   - type: textarea
     id: logs
