@@ -481,7 +481,7 @@ mod tests {
         result
             .entries
             .iter()
-            .find(|entry| entry.file == PathBuf::from("a/lib/util.py"))
+            .find(|entry| entry.file.as_path() == Path::new("a/lib/util.py"))
             .expect("ambiguous entry is present")
             .coverage
     }

@@ -6,7 +6,7 @@ you have a tested fix.
 
 ## Development setup
 
-1. Install Rust 1.88.0 using `rustup` or `mise`.
+1. Install Rust 1.99.0 using `rustup` or `mise`.
 2. Install prek 0.4.12:
 
    ```sh

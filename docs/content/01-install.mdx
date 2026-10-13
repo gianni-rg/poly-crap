@@ -3,12 +3,23 @@ title: Install
 description: Get the poly-crap binary with the installer, from crates.io, or from a source build.
 ---
 
-## Installer (macOS and Linux)
+## Installer
+
+macOS and Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/drew-simmons/poly-crap/releases/latest/download/poly-crap-installer.sh \
+  https://github.com/drew-simmons/poly-crap/releases/latest/download/\
+poly-crap-installer.sh \
   | sh
+```
+
+Windows PowerShell:
+
+```powershell
+$installer = 'https://github.com/drew-simmons/poly-crap/releases/' +
+  'latest/download/poly-crap-installer.ps1'
+irm $installer | iex
 ```
 
 :::note
@@ -21,7 +32,7 @@ a version, replace `latest/download` with `download/v0.8.0`.
 ## Cargo
 
 The crate is on [crates.io](https://crates.io/crates/poly-crap). With Rust
-1.88 or newer:
+1.99 or newer:
 
 ```sh
 cargo install poly-crap --locked
@@ -29,7 +40,7 @@ cargo install poly-crap --locked
 
 ## Build from source
 
-Building from source requires Rust 1.88 or newer:
+Building from source requires Rust 1.99 or newer:
 
 ```sh
 git clone https://github.com/drew-simmons/poly-crap.git
@@ -44,5 +55,6 @@ cargo install --path . --locked
 | macOS | Apple Silicon (`aarch64`), Intel (`x86_64`) |
 | Linux with glibc | `aarch64`, `x86_64` |
 | Linux with musl/Alpine | `x86_64` |
+| Windows | `x86_64` (MSVC) |
 
-There is no Windows build, and Windows is not tested.
+Windows support is tested in CI.

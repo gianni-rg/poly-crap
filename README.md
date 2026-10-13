@@ -23,12 +23,23 @@ Use it three ways:
 
 ## Install
 
-### Installer (macOS and Linux)
+### Installer
+
+macOS and Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/drew-simmons/poly-crap/releases/latest/download/poly-crap-installer.sh \
+  https://github.com/drew-simmons/poly-crap/releases/latest/download/\
+poly-crap-installer.sh \
   | sh
+```
+
+Windows PowerShell:
+
+```powershell
+$installer = 'https://github.com/drew-simmons/poly-crap/releases/' +
+  'latest/download/poly-crap-installer.ps1'
+irm $installer | iex
 ```
 
 The installer downloads a prebuilt release, checks its SHA-256 checksum, and
@@ -37,14 +48,14 @@ puts `poly-crap` in `~/.cargo/bin`. To pin a version, replace
 
 ### Cargo
 
-With Rust 1.88 or newer:
+With Rust 1.99 or newer:
 
 ```sh
 cargo install poly-crap --locked
 ```
 
 Or run `cargo install --path . --locked` from a clone. Prebuilt binaries cover
-macOS and Linux, and there is no Windows build; see
+macOS, Linux, and 64-bit Windows; see
 [Install](https://drew-simmons.github.io/poly-crap/install) for the targets.
 
 ## Quick start
@@ -70,7 +81,8 @@ macOS and Linux, and there is no Windows build; see
       6.0  4.0     50.0%  python    run     ./app.py:4  6-8
      1 more function not shown; adjust --min or --top to list them.
    1 of 2 functions exceeds CRAP threshold 5.0.
-   Coverage scope: 1 analyzed file, 1 coverage source file, 1 matched, 0 source-only, 0 coverage-only.
+   Coverage scope: 1 analyzed file, 1 coverage source file, 1 matched,
+   0 source-only, 0 coverage-only.
    ```
 
 4. Gate a branch. This scores only the functions the branch changed and exits
@@ -128,7 +140,7 @@ or into `~/.claude/skills/` for every project, and the agent picks it up.
 
 ## Development
 
-The project uses Rust 1.88.0. Before submitting a change, run:
+The project toolchain is pinned to Rust 1.99.0. Before submitting a change, run:
 
 ```sh
 cargo fmt --all --check

@@ -40,7 +40,7 @@ cargo llvm-cov --locked --all-targets --all-features --lcov --output-path lcov.i
 cargo run --locked -- --language rust --coverage lcov.info --threshold 5 --fail-above
 ```
 
-Toolchain is pinned to Rust 1.88.0 in `rust-toolchain.toml`; the edition is
+Toolchain is pinned to Rust 1.99.0 in `rust-toolchain.toml`; the edition is
 2024.
 
 ## Architecture

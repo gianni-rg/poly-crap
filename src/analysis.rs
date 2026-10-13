@@ -568,10 +568,10 @@ fn container_parts(node: Node<'_>, language: Language, source: &[u8]) -> Vec<Str
     let mut parts = Vec::new();
     let mut parent = node.parent();
     while let Some(ancestor) = parent {
-        if is_container(ancestor.kind()) {
-            if let Some(value) = container_name(ancestor, language, source) {
-                parts.push(value);
-            }
+        if is_container(ancestor.kind())
+            && let Some(value) = container_name(ancestor, language, source)
+        {
+            parts.push(value);
         }
         parent = ancestor.parent();
     }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use poly_crap::Analysis;
 use poly_crap::model::LineRange;
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -427,6 +427,7 @@ fn trim_ascii(raw: &[u8]) -> &[u8] {
 
 #[cfg(unix)]
 fn path_from_bytes(raw: &[u8]) -> Result<PathBuf> {
+    use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     Ok(PathBuf::from(OsString::from_vec(raw.to_vec())))
 }
