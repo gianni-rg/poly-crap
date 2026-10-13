@@ -4,3 +4,13 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - blume@1.6.3
   - katex@0.18.6
+# Blume-generated prerender chunks resolve these imports from docs/node_modules.
+publicHoistPattern:
+  - '@astrojs/*'
+  - '@pierre/*'
+  - '@shikijs/*'
+  - github-slugger
+  - sharp
+  - shiki
+  - simple-icons
+  - takumi-js
