@@ -19,7 +19,7 @@ you have a tested fix.
    ```
 
    The repository's `rust-toolchain.toml` selects Rust 1.88.0 and the
-   `rustfmt` and Clippy components.
+   `rustfmt`, Clippy, and `rust-analyzer` components.
 3. Install `prek` 0.4.12 with `uv`:
 
    ```powershell
