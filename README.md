@@ -27,13 +27,28 @@ Use it three ways:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/drew-simmons/poly-crap/releases/latest/download/poly-crap-installer.sh \
+  https://github.com/drew-simmons/poly-crap/releases/\
+latest/download/poly-crap-installer.sh \
   | sh
 ```
 
-The installer downloads a prebuilt release, checks its SHA-256 checksum, and
-puts `poly-crap` in `~/.cargo/bin`. To pin a version, replace
+The Unix installer downloads a prebuilt release, checks its SHA-256 checksum,
+and puts `poly-crap` in `~/.cargo/bin`. To pin a version, replace
 `latest/download` with `download/v0.8.0`.
+
+### Installer (Windows)
+
+In PowerShell, run:
+
+```powershell
+$installer = 'https://github.com/drew-simmons/poly-crap/releases/latest/' +
+  'download/poly-crap-installer.ps1'
+irm $installer | iex
+```
+
+This installs the `x86_64-pc-windows-msvc` release in Cargo's binary
+directory. If the installer adds that directory to your `PATH`, restart the
+shell before using `poly-crap`.
 
 ### Cargo
 
@@ -44,7 +59,7 @@ cargo install poly-crap --locked
 ```
 
 Or run `cargo install --path . --locked` from a clone. Prebuilt binaries cover
-macOS and Linux, and there is no Windows build; see
+macOS, Linux, and 64-bit Windows with MSVC; see
 [Install](https://drew-simmons.github.io/poly-crap/install) for the targets.
 
 ## Quick start
