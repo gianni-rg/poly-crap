@@ -6,6 +6,46 @@ you have a tested fix.
 
 ## Development setup
 
+### Windows (PowerShell)
+
+1. Install Visual Studio 2026 with the **Desktop development with C++**
+   workload, including the MSVC C++ build tools and a Windows SDK. These are
+   required by Rust's MSVC toolchain.
+2. Install [rustup](https://rustup.rs/) and Rust 1.88.0 for the 64-bit MSVC
+   target:
+
+   ```powershell
+   rustup toolchain install 1.88.0-x86_64-pc-windows-msvc
+   ```
+
+   The repository's `rust-toolchain.toml` selects Rust 1.88.0 and the
+   `rustfmt`, Clippy, and `rust-analyzer` components.
+3. Install `prek` 0.4.12 with `uv`:
+
+   ```powershell
+   uv tool install prek==0.4.12
+   ```
+
+4. Clone the repository and install its Git hook:
+
+   ```powershell
+   git clone https://github.com/drew-simmons/poly-crap.git
+   Set-Location poly-crap
+   prek install
+   ```
+
+5. Run the repository checks and package command from the repository root:
+
+   ```powershell
+   prek run --all-files
+   cargo fmt --all --check
+   cargo clippy --locked --all-targets --all-features -- -D warnings
+   cargo test --locked --all-targets
+   cargo package --locked --allow-dirty
+   ```
+
+### Unix-like shells
+
 1. Install Rust 1.88.0 using `rustup` or `mise`.
 2. Install prek 0.4.12:
 
