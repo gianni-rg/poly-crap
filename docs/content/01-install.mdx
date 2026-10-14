@@ -7,7 +7,8 @@ description: Get the poly-crap binary with the installer, from crates.io, or fro
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/drew-simmons/poly-crap/releases/latest/download/poly-crap-installer.sh \
+  https://github.com/drew-simmons/poly-crap/releases/\
+latest/download/poly-crap-installer.sh \
   | sh
 ```
 
@@ -17,6 +18,20 @@ puts `poly-crap` in `~/.cargo/bin`. Archives and checksums are also on
 [GitHub Releases](https://github.com/drew-simmons/poly-crap/releases). To pin
 a version, replace `latest/download` with `download/v0.8.0`.
 :::
+
+## Installer (Windows)
+
+Run this command in PowerShell:
+
+```powershell
+$installer = 'https://github.com/drew-simmons/poly-crap/releases/latest/' +
+  'download/poly-crap-installer.ps1'
+irm $installer | iex
+```
+
+The PowerShell installer is for the `x86_64-pc-windows-msvc` target. It
+installs to Cargo's binary directory. If that directory was added to your
+`PATH`, restart the shell before running `poly-crap`.
 
 ## Cargo
 
@@ -44,5 +59,4 @@ cargo install --path . --locked
 | macOS | Apple Silicon (`aarch64`), Intel (`x86_64`) |
 | Linux with glibc | `aarch64`, `x86_64` |
 | Linux with musl/Alpine | `x86_64` |
-
-There is no Windows build, and Windows is not tested.
+| Windows | 64-bit MSVC (`x86_64-pc-windows-msvc`) |

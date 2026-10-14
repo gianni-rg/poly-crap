@@ -2,7 +2,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use poly_crap::Analysis;
 use poly_crap::model::LineRange;
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
