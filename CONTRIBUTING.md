@@ -8,9 +8,9 @@ you have a tested fix.
 
 ### Windows (PowerShell)
 
-1. Install Visual Studio 2022 Build Tools with the **Desktop development
-   with C++** workload, including the MSVC C++ build tools and a Windows SDK.
-   These are required by Rust's MSVC toolchain.
+1. Install Visual Studio 2026 with the **Desktop development with C++**
+   workload, including the MSVC C++ build tools and a Windows SDK. These are
+   required by Rust's MSVC toolchain.
 2. Install [rustup](https://rustup.rs/) and Rust 1.88.0 for the 64-bit MSVC
    target:
 
