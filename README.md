@@ -85,7 +85,8 @@ macOS, Linux, and 64-bit Windows with MSVC; see
       6.0  4.0     50.0%  python    run     ./app.py:4  6-8
      1 more function not shown; adjust --min or --top to list them.
    1 of 2 functions exceeds CRAP threshold 5.0.
-   Coverage scope: 1 analyzed file, 1 coverage source file, 1 matched, 0 source-only, 0 coverage-only.
+   Coverage scope: 1 analyzed file, 1 coverage source file, 1 matched,
+   0 source-only, 0 coverage-only.
    ```
 
 4. Gate a branch. This scores only the functions the branch changed and exits
