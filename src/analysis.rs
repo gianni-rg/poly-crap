@@ -185,13 +185,16 @@ fn build_globs(patterns: &[String]) -> Result<GlobSet> {
 
 type GrammarLoader = fn(&Path) -> tree_sitter::Language;
 
-const GRAMMAR_LOADERS: [GrammarLoader; 6] = [
+const GRAMMAR_LOADERS: [GrammarLoader; 9] = [
     javascript_grammar,
     typescript_grammar,
     python_grammar,
     go_grammar,
     rust_grammar,
     java_grammar,
+    c_sharp_grammar,
+    cpp_grammar,
+    dart_grammar,
 ];
 
 fn grammar(language: Language, path: &Path) -> tree_sitter::Language {
@@ -224,6 +227,18 @@ fn rust_grammar(_: &Path) -> tree_sitter::Language {
 
 fn java_grammar(_: &Path) -> tree_sitter::Language {
     tree_sitter_java::LANGUAGE.into()
+}
+
+fn c_sharp_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_c_sharp::LANGUAGE.into()
+}
+
+fn cpp_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_cpp::LANGUAGE.into()
+}
+
+fn dart_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_dart::LANGUAGE.into()
 }
 
 fn analyze_file(path: &Path, language: Language) -> Result<FileAnalysis> {
@@ -348,7 +363,7 @@ fn is_test_marker(inner: &str) -> bool {
     inner == "test" || inner.ends_with("::test")
 }
 
-const DECLARATION_KINDS: [&[&str]; 6] = [
+const DECLARATION_KINDS: [&[&str]; 9] = [
     &[
         "function_declaration",
         "generator_function_declaration",
@@ -363,6 +378,29 @@ const DECLARATION_KINDS: [&[&str]; 6] = [
     &["function_declaration", "method_declaration"],
     &["function_item"],
     &["method_declaration", "constructor_declaration"],
+    &[
+        "method_declaration",
+        "constructor_declaration",
+        "destructor_declaration",
+        "property_declaration",
+        "operator_declaration",
+        "conversion_operator_declaration",
+        "enum_declaration",
+    ],
+    &[
+        "function_definition",
+        "method_declaration",
+        "constructor_declaration",
+        "destructor_declaration",
+    ],
+    &[
+        "function_signature",
+        "method_signature",
+        "getter_signature",
+        "setter_signature",
+        "constructor_signature",
+        "factory_constructor_signature",
+    ],
 ];
 
 fn named_unit<'tree>(
@@ -503,6 +541,31 @@ const ASSIGNMENT_SPECS: &[AssignmentSpec] = &[
         value_field: "value",
         callable_kinds: &["lambda_expression"],
     },
+    AssignmentSpec {
+        language: Language::CSharp,
+        node_kind: "assignment_expression",
+        name_field: "left",
+        value_field: "right",
+        callable_kinds: &[
+            "simple_lambda_expression",
+            "parenthesized_lambda_expression",
+            "anonymous_method_expression",
+        ],
+    },
+    AssignmentSpec {
+        language: Language::Cpp,
+        node_kind: "assignment_expression",
+        name_field: "left",
+        value_field: "right",
+        callable_kinds: &["lambda_expression"],
+    },
+    AssignmentSpec {
+        language: Language::Dart,
+        node_kind: "assignment_expression",
+        name_field: "left",
+        value_field: "right",
+        callable_kinds: &["function_expression"],
+    },
 ];
 
 fn assigned_callable<'tree>(
@@ -562,7 +625,7 @@ fn qualify_symbol(node: Node<'_>, language: Language, name: &str, source: &[u8])
     parts.join(SYMBOL_SEPARATORS[language.index()])
 }
 
-const SYMBOL_SEPARATORS: [&str; 6] = [".", ".", ".", ".", "::", "."];
+const SYMBOL_SEPARATORS: [&str; 9] = [".", ".", ".", ".", "::", ".", ".", "::", "."];
 
 fn container_parts(node: Node<'_>, language: Language, source: &[u8]) -> Vec<String> {
     let mut parts = Vec::new();
@@ -592,6 +655,8 @@ fn is_container(kind: &str) -> bool {
             | "trait_item"
             | "impl_item"
             | "mod_item"
+            | "mod_declaration"
+            | "namespace_declaration"
             | "function_declaration"
             | "function_definition"
             | "function_item"
@@ -694,6 +759,19 @@ fn is_callable(kind: &str) -> bool {
             | "closure_expression"
             | "constructor_declaration"
             | "lambda_expression"
+            | "destructor_declaration"
+            | "local_function_statement"
+            | "parenthesized_lambda_expression"
+            | "simple_lambda_expression"
+            | "anonymous_method_expression"
+            | "operator_declaration"
+            | "conversion_operator_declaration"
+            | "function_signature"
+            | "method_signature"
+            | "getter_signature"
+            | "setter_signature"
+            | "constructor_signature"
+            | "factory_constructor_signature"
     )
 }
 
@@ -728,6 +806,7 @@ fn is_simple_decision(node: Node<'_>) -> bool {
                 | "conditional_expression"
                 | "for_in_clause"
                 | "if_clause"
+                | "goto_statement"
         )
 }
 
@@ -746,6 +825,7 @@ fn is_arm_decision(kind: &str) -> bool {
             | "communication_case"
             | "case_clause"
             | "match_arm"
+            | "when_clause"
             // Java: one per label in both `case x:` and `case x ->` forms.
             // Counting the enclosing `switch_rule` instead would miss the
             // colon form and double-count the arrow form.
