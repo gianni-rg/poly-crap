@@ -304,6 +304,18 @@ fn collect_units<'tree>(
         if attributes.skips(child, source) {
             continue;
         }
+        // Also check if this node is a variable declarator / assignment site
+        // and push the assigned callable as a CodeUnit.
+        if language == Language::CSharp {
+            if let Some((callable_node, callable_name)) = assigned_callable(child, language, source)
+            {
+                let name = callable_name.clone();
+                output.push(UnitSpec {
+                    node: callable_node,
+                    name,
+                });
+            }
+        }
         collect_units(child, language, source, output);
     }
 }
@@ -386,6 +398,7 @@ const DECLARATION_KINDS: [&[&str]; 9] = [
         "operator_declaration",
         "conversion_operator_declaration",
         "enum_declaration",
+        "accessor_declaration",
     ],
     &[
         "function_definition",
@@ -431,16 +444,45 @@ fn is_bodyless_java_declaration(node: Node<'_>, language: Language) -> bool {
 }
 
 fn declared_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    // For C# conversion operators (implicit/explicit operator), there is no 'name' field;
+    // the method name is always "operator". Return that so the caller can build "ClassName.operator".
+    if node.kind() == "conversion_operator_declaration" {
+        return Some("operator".to_string());
+    }
     node.child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("identifier"))
+        .or_else(|| node.child_by_field_name("name_identifier"))
+        .or_else(|| {
+            // C++ function_definition → declarator → unnamed identifier child
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor).find_map(|child| {
+                if child.kind() == "function_declarator" || child.kind() == "constructor_declarator"
+                {
+                    let mut c2 = child.walk();
+                    child
+                        .named_children(&mut c2)
+                        .find(|grandchild| grandchild.kind() == "identifier")
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| {
+            // Direct: function_declarator or similar with unnamed identifier child
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier")
+        })
         .and_then(|name| text(name, source))
         .map(str::to_string)
 }
 
+/// Get the first named child that looks like a name or identifier.
 struct AssignmentSpec {
     language: Language,
     node_kind: &'static str,
     name_field: &'static str,
-    value_field: &'static str,
+    value_fields: &'static [&'static str],
     callable_kinds: &'static [&'static str],
 }
 
@@ -454,98 +496,98 @@ const ASSIGNMENT_SPECS: &[AssignmentSpec] = &[
         language: Language::JavaScript,
         node_kind: "variable_declarator",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "public_field_definition",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "pair",
         name_field: "key",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "variable_declarator",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "public_field_definition",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "pair",
         name_field: "key",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::Python,
         node_kind: "assignment",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &["lambda"],
     },
     AssignmentSpec {
         language: Language::Go,
         node_kind: "short_var_declaration",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &["func_literal"],
     },
     AssignmentSpec {
         language: Language::Go,
         node_kind: "var_spec",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: &["func_literal"],
     },
     AssignmentSpec {
         language: Language::Rust,
         node_kind: "let_declaration",
         name_field: "pattern",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: &["closure_expression"],
     },
     AssignmentSpec {
         language: Language::Java,
         node_kind: "variable_declarator",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: &["lambda_expression"],
     },
     AssignmentSpec {
         language: Language::CSharp,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &[
             "simple_lambda_expression",
             "parenthesized_lambda_expression",
@@ -553,17 +595,28 @@ const ASSIGNMENT_SPECS: &[AssignmentSpec] = &[
         ],
     },
     AssignmentSpec {
+        language: Language::CSharp,
+        node_kind: "variable_declarator",
+        name_field: "name",
+        value_fields: &["value", "initializer"],
+        callable_kinds: &[
+            "simple_lambda_expression",
+            "parenthesized_lambda_expression",
+            "lambda_expression",
+        ],
+    },
+    AssignmentSpec {
         language: Language::Cpp,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &["lambda_expression"],
     },
     AssignmentSpec {
         language: Language::Dart,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &["function_expression"],
     },
 ];
@@ -576,8 +629,27 @@ fn assigned_callable<'tree>(
     let spec = ASSIGNMENT_SPECS
         .iter()
         .find(|spec| spec.language == language && spec.node_kind == node.kind())?;
-    let name_node = unwrap_singleton(node.child_by_field_name(spec.name_field)?);
-    let value = unwrap_singleton(node.child_by_field_name(spec.value_field)?);
+    // Try the primary name field; fall back to first named child with kind "identifier"
+    let name_node = node
+        .child_by_field_name(spec.name_field)
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier")
+        })
+        .map(unwrap_singleton)?;
+    // Try each value field in order; fall back to named children for callable kinds
+    let value = spec
+        .value_fields
+        .iter()
+        .filter_map(|f| node.child_by_field_name(*f))
+        .next()
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| spec.callable_kinds.contains(&child.kind()))
+        })
+        .map(unwrap_singleton)?;
     spec.callable_kinds.contains(&value.kind()).then(|| {
         (
             value,
@@ -663,6 +735,8 @@ fn is_container(kind: &str) -> bool {
             | "method_definition"
             | "method_declaration"
             | "constructor_declaration"
+            | "accessor_declaration"
+            | "property_declaration"
     )
 }
 
@@ -1105,5 +1179,129 @@ mod tests {
             "the && of a let chain is a decision"
         );
         assert_eq!(units[2].complexity, 1.0, "a plain let is not");
+    }
+
+    #[test]
+    fn csharp_methods_and_constructors_produce_codeunits() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "namespace MyApp {\n",
+                "    class Service {\n",
+                "        public void Register() {}\n",
+                "        public Service() {}\n",
+                "        ~Service() {}\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(units.len(), 3);
+        // tree-sitter extracts just the name, not the ~ prefix
+        assert!(
+            units.iter().any(|u| u.symbol == "MyApp.Service.Register"),
+            "Register not found in {:?} (line {})",
+            units.iter().map(|u| &u.symbol).collect::<Vec<_>>(),
+            &format!(
+                "{:?}",
+                units.iter().map(|u| u.start_line).collect::<Vec<_>>()
+            )
+        );
+        // constructor and destructor both produce symbol "Service" but with different start lines
+        assert!(
+            units
+                .iter()
+                .any(|u| u.symbol == "MyApp.Service.Service" && u.start_line == 4),
+            "constructor not found at line 4"
+        );
+        assert!(
+            units
+                .iter()
+                .any(|u| u.symbol == "MyApp.Service.Service" && u.start_line == 5),
+            "destructor not found at line 5"
+        );
+    }
+
+    #[test]
+    fn csharp_operator_and_property_accessors_produce_codeunits() {
+        let source = concat!(
+            "class Vector {\n",
+            "    public int X { get; set; }\n",
+            "    public static implicit operator Vector(int a) { return new(); }\n",
+            "}\n",
+        );
+        let units = analyze("cs", source);
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Vector.operator"),
+            "operator not found in {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"Vector.X.get"),
+            "get accessor not found in {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"Vector.X.set"),
+            "set accessor not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_complexity_counts_and_and_or_and_when() {
+        let units = analyze(
+            "cs",
+            "class C { void M(bool a, bool b, bool c) { if (a && b || c) {} } }",
+        );
+        // 1 (base) + 1 (if_statement) + 1 (&&) + 1 (||) = 4
+        assert_eq!(
+            units[0].complexity, 4.0,
+            "if, &&, and || should count as decisions"
+        );
+    }
+
+    #[test]
+    fn csharp_complexity_when_clause_counts() {
+        let units = analyze(
+            "cs",
+            "class C { int M(int x) => x switch { 1 when x > 0 => 1, _ => 0 }; }",
+        );
+        // 1 (base) + 1 (when) = 2
+        assert_eq!(
+            units[0].complexity, 2.0,
+            "when clause should count as a decision"
+        );
+    }
+
+    #[test]
+    fn csharp_null_coalescing_not_counted() {
+        let units = analyze(
+            "cs",
+            "class C { string M(int? a, int? b) { return a ?? b ?? 0; } }",
+        );
+        // Only base complexity — ?? and ??= should NOT count
+        assert_eq!(
+            units[0].complexity, 1.0,
+            "?? should not count as a decision"
+        );
+    }
+
+    #[test]
+    fn csharp_field_assigned_lambda_is_codeunit() {
+        let source = concat!(
+            "namespace N {\n",
+            "    class C {\n",
+            "        System.Func<int> _fn = () => 42;\n",
+            "    }\n",
+            "}\n",
+        );
+        let units = analyze("cs", source);
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            !units.is_empty(),
+            "field-assigned lambda should be a CodeUnit; got {symbols:?}"
+        );
+        assert!(
+            units.iter().any(|u| u.symbol.contains("_fn")),
+            "field _fn not found in {symbols:?}"
+        );
     }
 }

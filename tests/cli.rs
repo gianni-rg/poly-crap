@@ -685,6 +685,84 @@ fn stale_coverage_report_warns_on_stderr() {
 }
 
 #[test]
+fn csharp_language_produces_codeunits() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir.path().join("service.cs"),
+        "namespace MyApp {\n    class Service {\n        public void Register() {}\n    }\n}\n",
+    );
+    let output = poly_crap()
+        .args([
+            "--path",
+            dir.path().to_str().unwrap(),
+            "--language",
+            "csharp",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        report["entries"][0]["symbol"].as_str().unwrap(),
+        "MyApp.Service.Register"
+    );
+}
+
+#[test]
+fn csharp_cli_with_cpp_and_dart_works() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir.path().join("app.cs"),
+        "class A { public void Run() {} }\n",
+    );
+    write(
+        &dir.path().join("main.cpp"),
+        "void run(bool x) { if (x) {} }\n",
+    );
+    write(
+        &dir.path().join("widget.dart"),
+        "void run(bool x) { if (x) {} }\n",
+    );
+    let output = poly_crap()
+        .args([
+            "--path",
+            dir.path().to_str().unwrap(),
+            "--language",
+            "csharp",
+            "--language",
+            "cpp",
+            "--language",
+            "dart",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    let languages: Vec<_> = entries
+        .iter()
+        .map(|e| e["language"].as_str().unwrap())
+        .collect();
+    assert!(languages.contains(&"csharp"));
+    assert!(languages.contains(&"cpp"));
+    assert!(languages.contains(&"dart"));
+}
+
+#[test]
 fn malformed_coverage_exits_two() {
     let dir = tempfile::tempdir().unwrap();
     write(&dir.path().join("app.js"), "function run() {}\n");
