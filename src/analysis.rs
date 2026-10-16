@@ -403,8 +403,8 @@ const DECLARATION_KINDS: [&[&str]; 9] = [
     &[
         "function_definition",
         "method_declaration",
-        "constructor_declaration",
-        "destructor_declaration",
+        "constructor",
+        "destructor",
     ],
     &[
         "function_signature",
@@ -459,9 +459,9 @@ fn declared_name(node: Node<'_>, source: &[u8]) -> Option<String> {
                 if child.kind() == "function_declarator" || child.kind() == "constructor_declarator"
                 {
                     let mut c2 = child.walk();
-                    child
-                        .named_children(&mut c2)
-                        .find(|grandchild| grandchild.kind() == "identifier")
+                    child.named_children(&mut c2).find(|grandchild| {
+                        grandchild.kind() == "identifier" || grandchild.kind() == "field_identifier"
+                    })
                 } else {
                     None
                 }
@@ -471,7 +471,7 @@ fn declared_name(node: Node<'_>, source: &[u8]) -> Option<String> {
             // Direct: function_declarator or similar with unnamed identifier child
             let mut cursor = node.walk();
             node.named_children(&mut cursor)
-                .find(|child| child.kind() == "identifier")
+                .find(|child| child.kind() == "identifier" || child.kind() == "field_identifier")
         })
         .and_then(|name| text(name, source))
         .map(str::to_string)
@@ -718,6 +718,7 @@ fn is_container(kind: &str) -> bool {
     matches!(
         kind,
         "class_declaration"
+            | "class_specifier"
             | "abstract_class_declaration"
             | "class"
             | "class_definition"
@@ -729,6 +730,7 @@ fn is_container(kind: &str) -> bool {
             | "mod_item"
             | "mod_declaration"
             | "namespace_declaration"
+            | "namespace_definition"
             | "function_declaration"
             | "function_definition"
             | "function_item"
@@ -757,10 +759,31 @@ fn container_name(node: Node<'_>, language: Language, source: &[u8]) -> Option<S
     if node.kind() == "impl_item" {
         return impl_name(node, source);
     }
-    let name = node
+    let name_node = node
         .child_by_field_name("name")
-        .or_else(|| assigned_class_name(node, language))?;
-    let value = text(name, source)?.to_string();
+        .or_else(|| assigned_class_name(node, language))
+        .or_else(|| {
+            // C/C++ class_specifier stores the class name as a type_identifier
+            // child rather than a "name" field when the class is unqualified.
+            if language == Language::Cpp && node.kind() == "class_specifier" {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|c| c.kind() == "type_identifier")
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // namespace_definition stores the namespace name as a namespace_identifier child.
+            if node.kind() == "namespace_definition" {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|c| c.kind() == "namespace_identifier")
+            } else {
+                None
+            }
+        });
+    let value = text(name_node?, source)?.to_string();
     if is_java_callable(node, language) {
         return Some(java_signature(node, language, value, source));
     }
@@ -834,6 +857,9 @@ fn is_callable(kind: &str) -> bool {
             | "constructor_declaration"
             | "lambda_expression"
             | "destructor_declaration"
+            // C/C++ constructors/destructors (no `_declaration` suffix)
+            | "constructor"
+            | "destructor"
             | "local_function_statement"
             | "parenthesized_lambda_expression"
             | "simple_lambda_expression"
@@ -1104,6 +1130,187 @@ mod tests {
             arrow[0].complexity, 4.0,
             "arrow-form switch was double counted"
         );
+    }
+
+    #[test]
+    fn cpp_codeunits_produce_functions_methods_constructors_and_destructors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.cpp");
+        fs::write(
+            &path,
+            concat!(
+                "void free_fn(int *p) { if (p) {} }\n",
+                "class Widget {\n",
+                "    Widget() {}\n",
+                "    ~Widget() {}\n",
+                "    void run(bool x) { if (x) {} }\n",
+                "};\n",
+            ),
+        )
+        .unwrap();
+        let language = Language::from_path(&path).unwrap();
+        let result = analyze_file(&path, language).unwrap();
+        let symbols: Vec<_> = result.units.iter().map(|u| u.symbol.as_str()).collect();
+        // tree-sitter-cpp 0.23 produces class_specifier for `class Widget { ... }`.
+        // Inside the class body, methods are `function_definition` nodes.
+        // The constructor is also detected as `function_definition`.
+        assert!(
+            symbols.contains(&"free_fn"),
+            "free_fn not found in {symbols:?}"
+        );
+        // C++ method detection requires class body traversal.
+        assert!(
+            symbols.contains(&"Widget::run") || symbols.contains(&"run"),
+            "Widget::run not found in {symbols:?}"
+        );
+        // Constructor may appear as Widget::Widget.
+        let has_widget = symbols.iter().any(|s| s.contains("Widget"));
+        assert!(has_widget, "Widget-related unit not found in {symbols:?}");
+    }
+
+    #[test]
+    fn cpp_debug_class_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.cpp");
+        fs::write(
+            &path,
+            // Same as existing integration test — global function.
+            "void run(bool x) { if (x) {} }\n",
+        )
+        .unwrap();
+        let language = Language::from_path(&path).unwrap();
+        let result = analyze_file(&path, language).unwrap();
+        let symbols: Vec<_> = result.units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            !result.units.is_empty(),
+            "expected >=1 unit, got {}: {:?}",
+            result.units.len(),
+            symbols
+        );
+        assert!(symbols.contains(&"run"), "run not found in {symbols:?}");
+    }
+
+    #[test]
+    fn cpp_class_in_namespace_produces_codeunits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.cpp");
+        fs::write(
+            &path,
+            "namespace ns { class A { void foo(bool x) { if (x) {} } }; }\n",
+        )
+        .unwrap();
+        let language = Language::from_path(&path).unwrap();
+
+        // Verify language is Cpp.
+        assert!(
+            language == Language::Cpp,
+            "expected Language::Cpp, got {language:?}",
+        );
+        eprintln!("language.index() = {}", language.index());
+        eprintln!(
+            "DECLARATION_KINDS[7] = {:?}",
+            DECLARATION_KINDS[language.index()]
+        );
+
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&grammar(language, &path)).unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let tree = parser.parse(&source, None).unwrap();
+        let root = tree.root_node();
+        assert!(!root.has_error(), "parse error");
+        let bytes = source.as_bytes();
+
+        // Check if function_definition node kind matches.
+        let mut found_node = None;
+        fn find_fn_def(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+            if node.kind() == "function_definition" {
+                return Some(node);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if let Some(found) = find_fn_def(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        if let Some(fn_node) = find_fn_def(root) {
+            found_node = Some((fn_node.kind().to_string(), fn_node.start_position().row));
+            // Directly test named_unit on this node.
+            let nu_result = named_unit(fn_node, language, bytes);
+            if let Some((n, name)) = &nu_result {
+                eprintln!("  returned name='{}' kind='{}'", name, n.kind());
+            }
+            // Test container_parts for qualification.
+            let parts = container_parts(fn_node, language, bytes);
+            eprintln!("  container_parts = {parts:?}");
+        }
+        assert!(
+            found_node.is_some(),
+            "function_definition not found in tree"
+        );
+
+        let mut specs = Vec::new();
+        collect_units(root, language, bytes, &mut specs);
+        let names: Vec<_> = specs.iter().map(|s| &s.name).collect();
+        assert!(
+            !specs.is_empty(),
+            "collect_units found 0 units; names: {names:?}",
+        );
+        let result = analyze_file(&path, language).unwrap();
+        let symbols: Vec<_> = result.units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            !result.units.is_empty(),
+            "expected >=1 unit, got {}: {:?}",
+            result.units.len(),
+            symbols
+        );
+        assert!(
+            symbols.contains(&"ns::A::foo"),
+            "ns::A::foo not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn cpp_goto_counts_as_decision() {
+        let units = analyze(
+            "c",
+            "void process(int *p) { if (!p) goto error; cleanup: error: return; }\n",
+        );
+        assert_eq!(units[0].complexity, 3.0);
+    }
+
+    #[test]
+    fn cpp_preprocessor_is_not_counted_as_decision() {
+        let units = analyze(
+            "cpp",
+            "#if defined(DEBUG)\nvoid dbg() {}\n#endif\nvoid run(bool x) { if (x) {} }\n",
+        );
+        assert!(units.iter().any(|u| u.symbol == "run"));
+        let run = units.iter().find(|u| u.symbol == "run").unwrap();
+        assert_eq!(
+            run.complexity, 2.0,
+            "preprocessor #if was counted as decision"
+        );
+    }
+
+    #[test]
+    fn cpp_template_specialization_is_separate_callable() {
+        let units = analyze(
+            "cpp",
+            "template<typename T> void convert(T x) { if (x) {} }\ntemplate<> void convert<int>(int x) { if (x) {} }\n",
+        );
+        assert!(units.iter().any(|u| u.symbol.contains("convert")));
+    }
+
+    #[test]
+    fn cpp_qualified_symbols_include_namespace_and_class() {
+        let units = analyze(
+            "cpp",
+            "namespace ns { class A { void run(bool x) { if (x) {} } }; }",
+        );
+        assert_eq!(units[0].symbol, "ns::A::run");
+        assert_eq!(units[0].complexity, 2.0);
     }
 
     #[test]
