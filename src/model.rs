@@ -19,21 +19,43 @@ pub enum Language {
     Go,
     Rust,
     Java,
+    #[value(name = "csharp", aliases = ["cs", "csx"])]
+    CSharp,
+    C,
+    #[value(name = "cpp", alias = "c++")]
+    Cpp,
+    #[value(name = "dart", alias = "dart")]
+    Dart,
 }
 
 impl Language {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
         Self::JavaScript,
         Self::TypeScript,
         Self::Python,
         Self::Go,
         Self::Rust,
         Self::Java,
+        Self::CSharp,
+        Self::C,
+        Self::Cpp,
+        Self::Dart,
     ];
 
-    const NAMES: [&'static str; 6] = ["javascript", "typescript", "python", "go", "rust", "java"];
+    const NAMES: [&'static str; 10] = [
+        "javascript",
+        "typescript",
+        "python",
+        "go",
+        "rust",
+        "java",
+        "csharp",
+        "c",
+        "cpp",
+        "dart",
+    ];
 
-    const ALIASES: [(&'static str, Self); 10] = [
+    const ALIASES: [(&'static str, Self); 17] = [
         ("javascript", Self::JavaScript),
         ("js", Self::JavaScript),
         ("typescript", Self::TypeScript),
@@ -44,15 +66,26 @@ impl Language {
         ("rust", Self::Rust),
         ("rs", Self::Rust),
         ("java", Self::Java),
+        ("csharp", Self::CSharp),
+        ("cs", Self::CSharp),
+        ("csx", Self::CSharp),
+        ("cpp", Self::Cpp),
+        ("c++", Self::Cpp),
+        ("c", Self::C),
+        ("dart", Self::Dart),
     ];
 
-    const EXTENSIONS: [(&'static [&'static str], Self); 6] = [
+    const EXTENSIONS: [(&'static [&'static str], Self); 10] = [
         (&["js", "jsx", "mjs", "cjs"], Self::JavaScript),
         (&["ts", "tsx", "mts", "cts"], Self::TypeScript),
         (&["py"], Self::Python),
         (&["go"], Self::Go),
         (&["rs"], Self::Rust),
         (&["java"], Self::Java),
+        (&["cs", "csx"], Self::CSharp),
+        (&["c"], Self::C),
+        (&["cpp", "cc", "cxx", "h", "hpp"], Self::Cpp),
+        (&["dart"], Self::Dart),
     ];
 
     #[must_use]
@@ -185,6 +218,57 @@ mod tests {
     fn display_pads_to_the_requested_width() {
         assert_eq!(format!("{:<10}|", Language::Go), "go        |");
         assert_eq!(format!("{}", Language::TypeScript), "typescript");
+        assert_eq!(format!("{}", Language::CSharp), "csharp");
+        assert_eq!(format!("{}", Language::Cpp), "cpp");
+        assert_eq!(format!("{}", Language::Dart), "dart");
+    }
+
+    #[test]
+    fn ten_language_catalog_is_aligned() {
+        let names = [
+            "javascript",
+            "typescript",
+            "python",
+            "go",
+            "rust",
+            "java",
+            "csharp",
+            "c",
+            "cpp",
+            "dart",
+        ];
+        assert_eq!(Language::ALL.len(), names.len());
+        for (index, language) in Language::ALL.iter().enumerate() {
+            assert_eq!(language.index(), index);
+            assert_eq!(language.as_str(), names[index]);
+            assert_eq!(names[index].parse::<Language>(), Ok(*language));
+            assert_eq!(serde_json::to_value(language).unwrap(), names[index]);
+        }
+        assert_eq!("csx".parse::<Language>(), Ok(Language::CSharp));
+    }
+
+    #[test]
+    fn from_path_detects_new_language_extensions() {
+        let cases = [
+            ("sample.cs", Language::CSharp),
+            ("sample.csx", Language::CSharp),
+            ("sample.c", Language::C),
+            ("sample.cpp", Language::Cpp),
+            ("sample.cc", Language::Cpp),
+            ("sample.cxx", Language::Cpp),
+            ("sample.h", Language::Cpp),
+            ("sample.hpp", Language::Cpp),
+            ("sample.dart", Language::Dart),
+        ];
+
+        for (filename, expected) in cases {
+            let path = std::path::Path::new(filename);
+            assert_eq!(
+                Language::from_path(path),
+                Some(expected),
+                "{filename:?} should be {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -200,11 +284,17 @@ mod tests {
             ("rust", Language::Rust),
             ("rs", Language::Rust),
             ("java", Language::Java),
+            ("csharp", Language::CSharp),
+            ("cs", Language::CSharp),
+            ("csx", Language::CSharp),
+            ("cpp", Language::Cpp),
+            ("c++", Language::Cpp),
+            ("c", Language::C),
+            ("dart", Language::Dart),
         ];
 
         for (value, expected) in cases {
             assert_eq!(value.parse::<Language>(), Ok(expected));
-            assert_eq!(value.to_ascii_uppercase().parse::<Language>(), Ok(expected));
         }
         assert_eq!(
             "ruby".parse::<Language>(),

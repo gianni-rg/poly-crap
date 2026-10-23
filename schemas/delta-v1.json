@@ -13,7 +13,7 @@
         "type": "object",
         "required": ["language", "file", "symbol", "start_line", "end_line", "complexity", "coverage", "coverage_basis", "score", "baseline_score", "delta", "status"],
         "properties": {
-          "language": { "enum": ["javascript", "typescript", "python", "go", "rust", "java"] },
+          "language": { "enum": ["javascript", "typescript", "python", "go", "rust", "java", "csharp", "c", "cpp", "dart"] },
           "file": { "type": "string" },
           "symbol": { "type": "string" },
           "start_line": { "type": "integer", "minimum": 1 },

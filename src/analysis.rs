@@ -185,13 +185,17 @@ fn build_globs(patterns: &[String]) -> Result<GlobSet> {
 
 type GrammarLoader = fn(&Path) -> tree_sitter::Language;
 
-const GRAMMAR_LOADERS: [GrammarLoader; 6] = [
+const GRAMMAR_LOADERS: [GrammarLoader; 10] = [
     javascript_grammar,
     typescript_grammar,
     python_grammar,
     go_grammar,
     rust_grammar,
     java_grammar,
+    c_sharp_grammar,
+    c_grammar,
+    cpp_grammar,
+    dart_grammar,
 ];
 
 fn grammar(language: Language, path: &Path) -> tree_sitter::Language {
@@ -224,6 +228,22 @@ fn rust_grammar(_: &Path) -> tree_sitter::Language {
 
 fn java_grammar(_: &Path) -> tree_sitter::Language {
     tree_sitter_java::LANGUAGE.into()
+}
+
+fn c_sharp_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_c_sharp::LANGUAGE.into()
+}
+
+fn cpp_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_cpp::LANGUAGE.into()
+}
+
+fn c_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_c::LANGUAGE.into()
+}
+
+fn dart_grammar(_: &Path) -> tree_sitter::Language {
+    tree_sitter_dart::LANGUAGE.into()
 }
 
 fn analyze_file(path: &Path, language: Language) -> Result<FileAnalysis> {
@@ -260,7 +280,7 @@ fn analyze_file(path: &Path, language: Language) -> Result<FileAnalysis> {
             file: path.to_path_buf(),
             symbol: qualify_symbol(spec.node, language, &spec.name, bytes),
             start_line: spec.node.start_position().row + 1,
-            end_line: spec.node.end_position().row + 1,
+            end_line: unit_end_line(spec.node, language),
             complexity: complexity(spec.node, bytes) as f64,
         })
         .collect();
@@ -268,6 +288,15 @@ fn analyze_file(path: &Path, language: Language) -> Result<FileAnalysis> {
         units,
         diagnostic: None,
     })
+}
+
+fn unit_end_line(node: Node<'_>, language: Language) -> usize {
+    let end = if language == Language::Dart && is_dart_callable(node.kind()) {
+        dart_body(node).unwrap_or(node)
+    } else {
+        node
+    };
+    end.end_position().row + 1
 }
 
 fn collect_units<'tree>(
@@ -348,7 +377,7 @@ fn is_test_marker(inner: &str) -> bool {
     inner == "test" || inner.ends_with("::test")
 }
 
-const DECLARATION_KINDS: [&[&str]; 6] = [
+const DECLARATION_KINDS: [&[&str]; 10] = [
     &[
         "function_declaration",
         "generator_function_declaration",
@@ -363,6 +392,31 @@ const DECLARATION_KINDS: [&[&str]; 6] = [
     &["function_declaration", "method_declaration"],
     &["function_item"],
     &["method_declaration", "constructor_declaration"],
+    &[
+        "method_declaration",
+        "constructor_declaration",
+        "destructor_declaration",
+        "property_declaration",
+        "operator_declaration",
+        "conversion_operator_declaration",
+        "accessor_declaration",
+        "local_function_statement",
+    ],
+    &["function_definition"],
+    &[
+        "function_definition",
+        "method_declaration",
+        "constructor",
+        "destructor",
+    ],
+    &[
+        "function_signature",
+        "method_signature",
+        "getter_signature",
+        "setter_signature",
+        "constructor_signature",
+        "factory_constructor_signature",
+    ],
 ];
 
 fn named_unit<'tree>(
@@ -381,28 +435,108 @@ fn declared_unit<'tree>(
     language: Language,
     source: &[u8],
 ) -> Option<(Node<'tree>, String)> {
-    if is_bodyless_java_declaration(node, language) {
+    if is_bodyless_declaration(node, language) {
         return None;
     }
+    if language == Language::CSharp && is_non_callable_csharp(node) {
+        return None;
+    }
+
     let name = declared_name(node, source)?;
     Some((node, java_signature(node, language, name, source)))
+}
+
+fn is_accessor_property(node: Node<'_>) -> bool {
+    node.kind() == "property_declaration" && node.child_by_field_name("accessors").is_some()
+}
+
+fn is_non_callable_csharp(node: Node<'_>) -> bool {
+    is_accessor_property(node)
+        || (node.kind() == "accessor_declaration" && node.child_by_field_name("body").is_none())
 }
 
 fn is_bodyless_java_declaration(node: Node<'_>, language: Language) -> bool {
     language == Language::Java && node.child_by_field_name("body").is_none()
 }
 
+fn is_bodyless_declaration(node: Node<'_>, language: Language) -> bool {
+    is_bodyless_java_declaration(node, language)
+        || (language == Language::CSharp
+            && matches!(
+                node.kind(),
+                "method_declaration" | "local_function_statement"
+            )
+            && node.child_by_field_name("body").is_none())
+}
+
 fn declared_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "constructor_signature" | "factory_constructor_signature"
+    ) {
+        return dart_constructor_name(node, source);
+    }
+    // For C# conversion operators (implicit/explicit operator), there is no 'name' field;
+    // the method name is always "operator". Return that so the caller can build "ClassName.operator".
+    if node.kind() == "conversion_operator_declaration" {
+        return Some("operator".to_string());
+    }
+    if node.kind() == "operator_declaration" {
+        return operator_name(node, source);
+    }
+
     node.child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("identifier"))
+        .or_else(|| node.child_by_field_name("name_identifier"))
+        .or_else(|| {
+            node.child_by_field_name("declarator")
+                .and_then(declarator_name)
+        })
+        .or_else(|| {
+            // Direct: function_declarator or similar with unnamed identifier child
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier" || child.kind() == "field_identifier")
+        })
         .and_then(|name| text(name, source))
         .map(str::to_string)
 }
 
+fn dart_constructor_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let names: Vec<_> = node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "identifier")
+        .filter_map(|child| text(child, source))
+        .collect();
+    (!names.is_empty()).then(|| names.join("."))
+}
+
+fn operator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let keyword = node
+        .children(&mut cursor)
+        .find(|child| child.kind() == "operator")?;
+    let token = text(keyword.next_sibling()?, source)?;
+    Some(format!("operator {token}"))
+}
+
+fn declarator_name(node: Node<'_>) -> Option<Node<'_>> {
+    if let Some(inner) = node.child_by_field_name("declarator") {
+        return declarator_name(inner);
+    }
+    if node.kind() == "parenthesized_declarator" {
+        return declarator_name(node.named_child(0)?);
+    }
+    Some(node)
+}
+
+/// Get the first named child that looks like a name or identifier.
 struct AssignmentSpec {
     language: Language,
     node_kind: &'static str,
     name_field: &'static str,
-    value_field: &'static str,
+    value_fields: &'static [&'static str],
     callable_kinds: &'static [&'static str],
 }
 
@@ -411,97 +545,159 @@ const JS_CALLABLES: &[&str] = &[
     "function_expression",
     "generator_function",
 ];
+const CSHARP_CALLABLES: &[&str] = &[
+    "simple_lambda_expression",
+    "parenthesized_lambda_expression",
+    "lambda_expression",
+    "anonymous_method_expression",
+];
 const ASSIGNMENT_SPECS: &[AssignmentSpec] = &[
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "variable_declarator",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "public_field_definition",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "pair",
         name_field: "key",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::JavaScript,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "variable_declarator",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "public_field_definition",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "pair",
         name_field: "key",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::TypeScript,
         node_kind: "assignment_expression",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: JS_CALLABLES,
     },
     AssignmentSpec {
         language: Language::Python,
         node_kind: "assignment",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &["lambda"],
     },
     AssignmentSpec {
         language: Language::Go,
         node_kind: "short_var_declaration",
         name_field: "left",
-        value_field: "right",
+        value_fields: &["right"],
         callable_kinds: &["func_literal"],
     },
     AssignmentSpec {
         language: Language::Go,
         node_kind: "var_spec",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: &["func_literal"],
     },
     AssignmentSpec {
         language: Language::Rust,
         node_kind: "let_declaration",
         name_field: "pattern",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: &["closure_expression"],
     },
     AssignmentSpec {
         language: Language::Java,
         node_kind: "variable_declarator",
         name_field: "name",
-        value_field: "value",
+        value_fields: &["value"],
         callable_kinds: &["lambda_expression"],
+    },
+    AssignmentSpec {
+        language: Language::CSharp,
+        node_kind: "assignment_expression",
+        name_field: "left",
+        value_fields: &["right"],
+        callable_kinds: CSHARP_CALLABLES,
+    },
+    AssignmentSpec {
+        language: Language::CSharp,
+        node_kind: "variable_declarator",
+        name_field: "name",
+        value_fields: &["value", "initializer"],
+        callable_kinds: CSHARP_CALLABLES,
+    },
+    AssignmentSpec {
+        language: Language::Cpp,
+        node_kind: "init_declarator",
+        name_field: "declarator",
+        value_fields: &["value"],
+        callable_kinds: &["lambda_expression"],
+    },
+    AssignmentSpec {
+        language: Language::Cpp,
+        node_kind: "assignment_expression",
+        name_field: "left",
+        value_fields: &["right"],
+        callable_kinds: &["lambda_expression"],
+    },
+    AssignmentSpec {
+        language: Language::Dart,
+        node_kind: "initialized_variable_definition",
+        name_field: "name",
+        value_fields: &["value"],
+        callable_kinds: &["function_expression"],
+    },
+    AssignmentSpec {
+        language: Language::Dart,
+        node_kind: "static_final_declaration",
+        name_field: "name",
+        value_fields: &["value"],
+        callable_kinds: &["function_expression"],
+    },
+    AssignmentSpec {
+        language: Language::Dart,
+        node_kind: "initialized_identifier",
+        name_field: "name",
+        value_fields: &["value"],
+        callable_kinds: &["function_expression"],
+    },
+    AssignmentSpec {
+        language: Language::Dart,
+        node_kind: "assignment_expression",
+        name_field: "left",
+        value_fields: &["right"],
+        callable_kinds: &["function_expression"],
     },
 ];
 
@@ -513,8 +709,27 @@ fn assigned_callable<'tree>(
     let spec = ASSIGNMENT_SPECS
         .iter()
         .find(|spec| spec.language == language && spec.node_kind == node.kind())?;
-    let name_node = unwrap_singleton(node.child_by_field_name(spec.name_field)?);
-    let value = unwrap_singleton(node.child_by_field_name(spec.value_field)?);
+    // Try the primary name field; fall back to first named child with kind "identifier"
+    let name_node = node
+        .child_by_field_name(spec.name_field)
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier")
+        })
+        .map(unwrap_singleton)?;
+    // Try each value field in order; fall back to named children for callable kinds
+    let value = spec
+        .value_fields
+        .iter()
+        .filter_map(|f| node.child_by_field_name(*f))
+        .next()
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| spec.callable_kinds.contains(&child.kind()))
+        })
+        .map(unwrap_singleton)?;
     spec.callable_kinds.contains(&value.kind()).then(|| {
         (
             value,
@@ -554,7 +769,10 @@ fn java_parameter_types(parameters: Node<'_>, source: &[u8]) -> Vec<String> {
 }
 
 fn qualify_symbol(node: Node<'_>, language: Language, name: &str, source: &[u8]) -> String {
-    let mut parts = container_parts(node, language, source);
+    let mut parts = csharp_file_scoped_namespace(node, language, source)
+        .into_iter()
+        .collect::<Vec<_>>();
+    parts.extend(container_parts(node, language, source));
     if let Some(receiver) = go_receiver_name(node, language, source) {
         parts.push(receiver);
     }
@@ -562,7 +780,27 @@ fn qualify_symbol(node: Node<'_>, language: Language, name: &str, source: &[u8])
     parts.join(SYMBOL_SEPARATORS[language.index()])
 }
 
-const SYMBOL_SEPARATORS: [&str; 6] = [".", ".", ".", ".", "::", "."];
+fn csharp_file_scoped_namespace(
+    node: Node<'_>,
+    language: Language,
+    source: &[u8],
+) -> Option<String> {
+    if language != Language::CSharp {
+        return None;
+    }
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .find(|child| child.kind() == "file_scoped_namespace_declaration")
+        .and_then(|namespace| namespace.child_by_field_name("name"))
+        .and_then(|name| text(name, source))
+        .map(str::to_string)
+}
+
+const SYMBOL_SEPARATORS: [&str; 10] = [".", ".", ".", ".", "::", ".", ".", "::", "::", "."];
 
 fn container_parts(node: Node<'_>, language: Language, source: &[u8]) -> Vec<String> {
     let mut parts = Vec::new();
@@ -583,21 +821,31 @@ fn is_container(kind: &str) -> bool {
     matches!(
         kind,
         "class_declaration"
+            | "class_specifier"
+            | "struct_specifier"
+            | "union_specifier"
             | "abstract_class_declaration"
             | "class"
             | "class_definition"
             | "interface_declaration"
             | "enum_declaration"
             | "record_declaration"
+            | "struct_declaration"
             | "trait_item"
             | "impl_item"
             | "mod_item"
+            | "mod_declaration"
+            | "namespace_declaration"
+            | "namespace_definition"
             | "function_declaration"
             | "function_definition"
             | "function_item"
             | "method_definition"
             | "method_declaration"
             | "constructor_declaration"
+            | "accessor_declaration"
+            | "property_declaration"
+            | "file_scoped_namespace_declaration"
     )
 }
 
@@ -618,10 +866,35 @@ fn container_name(node: Node<'_>, language: Language, source: &[u8]) -> Option<S
     if node.kind() == "impl_item" {
         return impl_name(node, source);
     }
-    let name = node
+    let name_node = node
         .child_by_field_name("name")
-        .or_else(|| assigned_class_name(node, language))?;
-    let value = text(name, source)?.to_string();
+        .or_else(|| {
+            node.child_by_field_name("declarator")
+                .and_then(declarator_name)
+        })
+        .or_else(|| assigned_class_name(node, language))
+        .or_else(|| {
+            // C/C++ class_specifier stores the class name as a type_identifier
+            // child rather than a "name" field when the class is unqualified.
+            if language == Language::Cpp && node.kind() == "class_specifier" {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|c| c.kind() == "type_identifier")
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // namespace_definition stores the namespace name as a namespace_identifier child.
+            if node.kind() == "namespace_definition" {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|c| c.kind() == "namespace_identifier")
+            } else {
+                None
+            }
+        });
+    let value = text(name_node?, source)?.to_string();
     if is_java_callable(node, language) {
         return Some(java_signature(node, language, value, source));
     }
@@ -665,6 +938,14 @@ fn complexity(root: Node<'_>, source: &[u8]) -> usize {
 }
 
 fn count_decisions(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
+    if is_dart_callable(node.kind()) {
+        return count_dart_body(node, root, source, count);
+    }
+    walk_and_count(node, root, source, count);
+}
+
+/// Walk a node and all its descendants, counting decision points.
+fn walk_and_count(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
     if node != root && is_callable(node.kind()) {
         return;
     }
@@ -673,8 +954,48 @@ fn count_decisions(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut us
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        count_decisions(child, root, source, count);
+        walk_and_count(child, root, source, count);
     }
+}
+
+/// For a Dart callable node, walk its `function_body` instead of descending
+/// into child nodes (tree-sitter-dart places the body inside a separate node).
+fn count_dart_body(callable: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
+    if callable != root {
+        return;
+    }
+    if let Some(body) = dart_body(callable) {
+        walk_and_count(body, body, source, count);
+    }
+}
+
+/// Dart local declarations have an unfielded body inside their own wrapper.
+fn dart_body(callable: Node<'_>) -> Option<Node<'_>> {
+    let owner = callable.parent()?;
+    if owner.kind() == "method_signature" {
+        return dart_body(owner);
+    }
+    owner
+        .child_by_field_name("body")
+        .or_else(|| {
+            let mut cursor = owner.walk();
+            owner
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "function_body")
+        })
+        .filter(|body| body.kind() == "function_body")
+}
+
+fn is_dart_callable(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_signature"
+            | "method_signature"
+            | "getter_signature"
+            | "setter_signature"
+            | "constructor_signature"
+            | "factory_constructor_signature"
+    )
 }
 
 fn is_callable(kind: &str) -> bool {
@@ -694,6 +1015,23 @@ fn is_callable(kind: &str) -> bool {
             | "closure_expression"
             | "constructor_declaration"
             | "lambda_expression"
+            | "destructor_declaration"
+            // C/C++ constructors/destructors (no `_declaration` suffix)
+            | "constructor"
+            | "destructor"
+            | "local_function_statement"
+            | "local_function_declaration"
+            | "parenthesized_lambda_expression"
+            | "simple_lambda_expression"
+            | "anonymous_method_expression"
+            | "operator_declaration"
+            | "conversion_operator_declaration"
+            | "function_signature"
+            | "method_signature"
+            | "getter_signature"
+            | "setter_signature"
+            | "constructor_signature"
+            | "factory_constructor_signature"
     )
 }
 
@@ -715,7 +1053,9 @@ fn is_simple_decision(node: Node<'_>) -> bool {
                 | "elif_clause"
                 | "if_expression"
                 | "for_statement"
+                | "foreach_statement"
                 | "for_in_statement"
+                | "for_range_loop"
                 | "while_statement"
                 | "while_expression"
                 | "do_statement"
@@ -728,6 +1068,13 @@ fn is_simple_decision(node: Node<'_>) -> bool {
                 | "conditional_expression"
                 | "for_in_clause"
                 | "if_clause"
+                | "goto_statement"
+                // Dart uses flat node kinds for control flow.
+                | "if"
+                | "for"
+                | "while"
+                | "do"
+                | "switch"
         )
 }
 
@@ -741,11 +1088,14 @@ fn is_arm_decision(kind: &str) -> bool {
     matches!(
         kind,
         "switch_case"
+            | "case_statement"
             | "expression_case"
             | "type_case"
             | "communication_case"
             | "case_clause"
+                | "switch_expression_arm"
             | "match_arm"
+            | "when_clause"
             // Java: one per label in both `case x:` and `case x ->` forms.
             // Counting the enclosing `switch_rule` instead would miss the
             // colon form and double-count the arrow form.
@@ -755,7 +1105,16 @@ fn is_arm_decision(kind: &str) -> bool {
 
 fn is_non_default_arm(node: Node<'_>, source: &[u8]) -> bool {
     let value = text(node, source).unwrap_or_default().trim_start();
+    if node.kind() == "switch_expression_arm" {
+        return !is_csharp_default_arm(value);
+    }
     !value.starts_with("default") && !value.starts_with("_ =>") && !is_wildcard_case(value)
+}
+
+fn is_csharp_default_arm(value: &str) -> bool {
+    value
+        .strip_prefix('_')
+        .is_some_and(|rest| rest.trim_start().starts_with("=>"))
 }
 
 /// Python's `case _:` is the default arm of a `match` and adds nothing, like
@@ -774,6 +1133,10 @@ fn is_boolean_decision(node: Node<'_>, source: &[u8]) -> bool {
     matches!(
         node.kind(),
         "binary_expression" | "boolean_operator" | "let_chain"
+            // Dart: `logical_and_expression` / `logical_or_expression` embed the
+            // operator in text rather than as a named child.
+            | "logical_and_expression"
+            | "logical_or_expression"
     ) && has_boolean_operator(node, source)
 }
 
@@ -879,6 +1242,15 @@ mod tests {
     }
 
     #[test]
+    fn c_accepts_c_identifier() {
+        let units = analyze("c", "int new(int x) { if (x) return 1; return 0; }");
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].language.as_str(), "c");
+        assert_eq!(units[0].symbol, "new");
+        assert_eq!(units[0].complexity, 2.0);
+    }
+
+    #[test]
     fn rust_match_ignores_default_arm() {
         let units = analyze(
             "rs",
@@ -950,6 +1322,315 @@ mod tests {
             arrow[0].complexity, 4.0,
             "arrow-form switch was double counted"
         );
+    }
+
+    #[test]
+    fn cpp_codeunits_produce_functions_methods_constructors_and_destructors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.cpp");
+        fs::write(
+            &path,
+            concat!(
+                "void free_fn(int *p) { if (p) {} }\n",
+                "class Widget {\n",
+                "    Widget() {}\n",
+                "    ~Widget() {}\n",
+                "    void run(bool x) { if (x) {} }\n",
+                "};\n",
+            ),
+        )
+        .unwrap();
+        let language = Language::from_path(&path).unwrap();
+        let result = analyze_file(&path, language).unwrap();
+        let symbols: Vec<_> = result.units.iter().map(|u| u.symbol.as_str()).collect();
+        // tree-sitter-cpp 0.23 produces class_specifier for `class Widget { ... }`.
+        // Inside the class body, methods are `function_definition` nodes.
+        // The constructor is also detected as `function_definition`.
+        assert!(
+            symbols.contains(&"free_fn"),
+            "free_fn not found in {symbols:?}"
+        );
+        // C++ method detection requires class body traversal.
+        assert!(
+            symbols.contains(&"Widget::run") || symbols.contains(&"run"),
+            "Widget::run not found in {symbols:?}"
+        );
+        // Constructor may appear as Widget::Widget.
+        let has_widget = symbols.iter().any(|s| s.contains("Widget"));
+        assert!(has_widget, "Widget-related unit not found in {symbols:?}");
+    }
+
+    #[test]
+    fn cpp_debug_class_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.cpp");
+        fs::write(
+            &path,
+            // Same as existing integration test — global function.
+            "void run(bool x) { if (x) {} }\n",
+        )
+        .unwrap();
+        let language = Language::from_path(&path).unwrap();
+        let result = analyze_file(&path, language).unwrap();
+        let symbols: Vec<_> = result.units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            !result.units.is_empty(),
+            "expected >=1 unit, got {}: {:?}",
+            result.units.len(),
+            symbols
+        );
+        assert!(symbols.contains(&"run"), "run not found in {symbols:?}");
+    }
+
+    #[test]
+    fn cpp_class_in_namespace_produces_codeunits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.cpp");
+        fs::write(
+            &path,
+            "namespace ns { class A { void foo(bool x) { if (x) {} } }; }\n",
+        )
+        .unwrap();
+        let language = Language::from_path(&path).unwrap();
+
+        // Verify language is Cpp.
+        assert!(
+            language == Language::Cpp,
+            "expected Language::Cpp, got {language:?}",
+        );
+        eprintln!("language.index() = {}", language.index());
+        eprintln!(
+            "DECLARATION_KINDS[7] = {:?}",
+            DECLARATION_KINDS[language.index()]
+        );
+
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&grammar(language, &path)).unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let tree = parser.parse(&source, None).unwrap();
+        let root = tree.root_node();
+        assert!(!root.has_error(), "parse error");
+        let bytes = source.as_bytes();
+
+        // Check if function_definition node kind matches.
+        let mut found_node = None;
+        fn find_fn_def(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+            if node.kind() == "function_definition" {
+                return Some(node);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if let Some(found) = find_fn_def(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        if let Some(fn_node) = find_fn_def(root) {
+            found_node = Some((fn_node.kind().to_string(), fn_node.start_position().row));
+            // Directly test named_unit on this node.
+            let nu_result = named_unit(fn_node, language, bytes);
+            if let Some((n, name)) = &nu_result {
+                eprintln!("  returned name='{}' kind='{}'", name, n.kind());
+            }
+            // Test container_parts for qualification.
+            let parts = container_parts(fn_node, language, bytes);
+            eprintln!("  container_parts = {parts:?}");
+        }
+        assert!(
+            found_node.is_some(),
+            "function_definition not found in tree"
+        );
+
+        let mut specs = Vec::new();
+        collect_units(root, language, bytes, &mut specs);
+        let names: Vec<_> = specs.iter().map(|s| &s.name).collect();
+        assert!(
+            !specs.is_empty(),
+            "collect_units found 0 units; names: {names:?}",
+        );
+        let result = analyze_file(&path, language).unwrap();
+        let symbols: Vec<_> = result.units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            !result.units.is_empty(),
+            "expected >=1 unit, got {}: {:?}",
+            result.units.len(),
+            symbols
+        );
+        assert!(
+            symbols.contains(&"ns::A::foo"),
+            "ns::A::foo not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn cpp_goto_counts_as_decision() {
+        let units = analyze(
+            "c",
+            "void process(int *p) { if (!p) goto error; cleanup: error: return; }\n",
+        );
+        assert_eq!(units[0].complexity, 3.0);
+    }
+
+    #[test]
+    fn c_and_cpp_count_runtime_decisions_but_not_preprocessor_branches() {
+        let source = concat!(
+            "void process_data(int *data) {\n",
+            "#if defined(DEBUG)\n",
+            "  int value = 0;\n",
+            "#elif defined(TRACE)\n",
+            "  int value = 1;\n",
+            "#else\n",
+            "  int value = 2;\n",
+            "#endif\n",
+            "  if (data && data[0] || data[1]) goto cleanup;\n",
+            "cleanup: return;\n",
+            "}\n",
+        );
+        for extension in ["c", "cpp"] {
+            let units = analyze(extension, source);
+            assert_eq!(units.len(), 1);
+            assert_eq!(units[0].symbol, "process_data");
+            assert_eq!(units[0].complexity, 5.0);
+            assert_eq!(units[0].language.as_str(), extension);
+        }
+    }
+
+    #[test]
+    fn vc3_cpp_lambdas_include_enclosing_function_names() {
+        let units = analyze(
+            "cpp",
+            concat!(
+                "namespace ns {\n",
+                "void first() { auto handler = [](bool x) { if (x) {} }; }\n",
+                "void second() { auto handler = [](bool x) { if (x) { while (x) {} } }; }\n",
+                "}\n",
+            ),
+        );
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| (unit.symbol.as_str(), unit.complexity))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("ns::first", 1.0),
+                ("ns::first::handler", 2.0),
+                ("ns::second", 1.0),
+                ("ns::second::handler", 3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn vc3_cpp_range_loop_counts_as_one_decision() {
+        let units = analyze(
+            "cpp",
+            "int sum(int (&values)[3]) { int total = 0; for (int value : values) { total += value; } return total; }",
+        );
+        assert_eq!(symbols(&units), ["sum"]);
+        assert_eq!(units[0].complexity, 2.0);
+    }
+
+    #[test]
+    fn vc3_c_and_cpp_switch_cases_exclude_default_labels() {
+        for language in ["c", "cpp"] {
+            for (body, complexity) in [
+                (
+                    "case 1: return 1; case 2: return 2; default: return 0;",
+                    3.0,
+                ),
+                ("case 1: case 2: return 1; default: return 0;", 3.0),
+                ("default: return 0;", 1.0),
+            ] {
+                let units = analyze(
+                    language,
+                    &format!("int pick(int x) {{ switch (x) {{ {body} }} }}"),
+                );
+                assert_eq!(symbols(&units), ["pick"], "{language}");
+                assert_eq!(units[0].complexity, complexity, "{language}: {body}");
+            }
+        }
+    }
+
+    #[test]
+    fn cpp_preprocessor_is_not_counted_as_decision() {
+        let units = analyze(
+            "cpp",
+            "#if defined(DEBUG)\nvoid dbg() {}\n#endif\nvoid run(bool x) { if (x) {} }\n",
+        );
+        assert!(units.iter().any(|u| u.symbol == "run"));
+        let run = units.iter().find(|u| u.symbol == "run").unwrap();
+        assert_eq!(
+            run.complexity, 2.0,
+            "preprocessor #if was counted as decision"
+        );
+    }
+
+    #[test]
+    fn cpp_template_specialization_is_separate_callable() {
+        let units = analyze(
+            "cpp",
+            "template<typename T> void convert(T x) { if (x) {} }\ntemplate<> void convert<int>(int x) { if (x) {} }\n",
+        );
+        assert_eq!(symbols(&units), ["convert", "convert<int>"]);
+        assert!(units.iter().all(|unit| unit.complexity == 2.0));
+    }
+
+    #[test]
+    fn cpp_complete_declarator_names_and_type_scopes() {
+        let units = analyze(
+            "cpp",
+            concat!(
+                "namespace ns {\n",
+                "struct Widget { Widget() {} ~Widget() {} void run() {} };\n",
+                "union Value { int x; void run() {} };\n",
+                "void Widget::outside() {}\n",
+                "bool Widget::operator==(const Widget& other) { return true; }\n",
+                "int (*factory())(int) { return nullptr; }\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(
+            symbols(&units),
+            [
+                "ns::Widget::Widget",
+                "ns::Widget::~Widget",
+                "ns::Widget::run",
+                "ns::Value::run",
+                "ns::Widget::outside",
+                "ns::Widget::operator==",
+                "ns::factory",
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_initialized_lambda_has_own_unit_and_decisions() {
+        let units = analyze(
+            "cpp",
+            concat!(
+                "void outer(bool ready) {\n",
+                "auto handler = [](bool x) { if (x) return 1; return 0; };\n",
+                "if (ready) handler(ready);\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(symbols(&units), ["outer", "outer::handler"]);
+        assert_eq!(
+            units.iter().map(|unit| unit.complexity).collect::<Vec<_>>(),
+            [2.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn cpp_qualified_symbols_include_namespace_and_class() {
+        let units = analyze(
+            "cpp",
+            "namespace ns { class A { void run(bool x) { if (x) {} } }; }",
+        );
+        assert_eq!(units[0].symbol, "ns::A::run");
+        assert_eq!(units[0].complexity, 2.0);
     }
 
     #[test]
@@ -1025,5 +1706,579 @@ mod tests {
             "the && of a let chain is a decision"
         );
         assert_eq!(units[2].complexity, 1.0, "a plain let is not");
+    }
+
+    #[test]
+    fn csharp_methods_and_constructors_produce_codeunits() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "namespace MyApp {\n",
+                "    class Service {\n",
+                "        public void Register() {}\n",
+                "        public Service() {}\n",
+                "        ~Service() {}\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(
+            units
+                .iter()
+                .map(|unit| (
+                    unit.symbol.as_str(),
+                    unit.start_line,
+                    unit.end_line,
+                    unit.complexity,
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("MyApp.Service.Register", 3, 3, 1.0),
+                ("MyApp.Service.Service", 4, 4, 1.0),
+                ("MyApp.Service.Service", 5, 5, 1.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn vc2_csharp_bodyless_methods_are_not_codeunits() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "interface I { void Contract(); }\n",
+                "abstract class Base { public abstract void Abstract(); public partial void Partial(); }\n",
+                "class C : Base { public override void Abstract() {} public partial void Partial() {} public void Expression() => Work(); }\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            ["C.Abstract", "C.Partial", "C.Expression"],
+            "only implemented C# methods are executable units"
+        );
+    }
+
+    #[test]
+    fn vc2_csharp_file_scoped_namespace_qualifies_types_and_nested_callables() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "namespace MyApp.Services;\n",
+                "class Service {\n",
+                "    void Register() { void Local() {} }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            [
+                "MyApp.Services.Service.Register",
+                "MyApp.Services.Service.Register.Local"
+            ]
+        );
+    }
+
+    #[test]
+    fn vc2_csharp_foreach_and_await_foreach_count_as_decisions() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "class C {\n",
+                "    void Each(System.Collections.Generic.IEnumerable<int> items) { foreach (var item in items) { } }\n",
+                "    async System.Threading.Tasks.Task AwaitEach(System.Collections.Generic.IAsyncEnumerable<int> items) { await foreach (var item in items) { } }\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].complexity, 2.0);
+        assert_eq!(units[1].complexity, 2.0);
+    }
+
+    #[test]
+    fn csharp_operator_and_property_accessors_produce_codeunits() {
+        let source = concat!(
+            "class Vector {\n",
+            "    public int X { get { return 0; } set { } }\n",
+            "    public static implicit operator Vector(int a) { return new(); }\n",
+            "}\n",
+        );
+        let units = analyze("cs", source);
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Vector.operator"),
+            "operator not found in {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"Vector.X.get"),
+            "get accessor not found in {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"Vector.X.set"),
+            "set accessor not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_complexity_counts_and_and_or_and_when() {
+        let units = analyze(
+            "cs",
+            "class C { void M(bool a, bool b, bool c) { if (a && b || c) {} } }",
+        );
+        // 1 (base) + 1 (if_statement) + 1 (&&) + 1 (||) = 4
+        assert_eq!(
+            units[0].complexity, 4.0,
+            "if, &&, and || should count as decisions"
+        );
+    }
+
+    #[test]
+    fn csharp_complexity_when_clause_counts() {
+        let units = analyze(
+            "cs",
+            "class C { int M(int x) => x switch { 1 when x > 0 => 1, _ => 0 }; }",
+        );
+        // 1 (base) + 1 (switch arm) + 1 (when) = 3
+        assert_eq!(
+            units[0].complexity, 3.0,
+            "switch arm and when clause should count as decisions"
+        );
+    }
+
+    #[test]
+    fn csharp_null_coalescing_not_counted() {
+        let units = analyze(
+            "cs",
+            "class C { string M(string a, string b) { a ??= b; return a ?? b; } }",
+        );
+        // Only base complexity — ?? and ??= should NOT count
+        assert_eq!(
+            units[0].complexity, 1.0,
+            "?? should not count as a decision"
+        );
+    }
+
+    #[test]
+    fn csharp_field_assigned_lambda_is_codeunit() {
+        let source = concat!(
+            "namespace N {\n",
+            "    class C {\n",
+            "        System.Func<int> _fn = () => 42;\n",
+            "    }\n",
+            "}\n",
+        );
+        let units = analyze("cs", source);
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            !units.is_empty(),
+            "field-assigned lambda should be a CodeUnit; got {symbols:?}"
+        );
+        assert!(
+            units.iter().any(|u| u.symbol.contains("_fn")),
+            "field _fn not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_local_functions_and_enums_have_exact_units_and_boundaries() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "enum Color { Red, Blue }\n",
+                "class C {\n",
+                "    int Outer(bool value) {\n",
+                "        int Inner(bool nested) { if (nested) return 1; return 0; }\n",
+                "        if (value) return Inner(value);\n",
+                "        return 0;\n",
+                "    }\n",
+                "}\n",
+            ),
+        );
+        let mut symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        symbols.sort_unstable();
+        assert_eq!(symbols, ["C.Outer", "C.Outer.Inner"]);
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Outer.Inner")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Outer")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+    }
+
+    #[test]
+    fn csharp_assigned_callables_are_emitted_once_with_own_complexity() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "class C {\n",
+                "    void M(bool outer) {\n",
+                "        System.Func<bool, int> local = value => value && outer ? 1 : 0;\n",
+                "        if (outer) local(outer);\n",
+                "    }\n",
+                "    System.Func<int, int> Field = (value) => value > 0 ? value : 0;\n",
+                "    System.Func<int, int> Anonymous = delegate(int value) { if (value > 0) return value; return 0; };\n",
+                "}\n",
+            ),
+        );
+        let mut names: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["C.Anonymous", "C.Field", "C.M", "C.M.local"]);
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Field")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Anonymous")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.M")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+    }
+
+    #[test]
+    fn csharp_reassignments_support_all_callable_forms() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "class C { void M() {\n",
+                "a = x => x ? 1 : 0;\n",
+                "b = (bool x) => { if (x) return 1; return 0; };\n",
+                "c = delegate(bool x) { if (x) return 1; return 0; };\n",
+                "} int Auto { get; set; } }\n",
+            ),
+        );
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| (unit.symbol.as_str(), unit.complexity))
+            .collect();
+        assert_eq!(
+            actual,
+            [("C.M", 1.0), ("C.M.a", 2.0), ("C.M.b", 2.0), ("C.M.c", 2.0)]
+        );
+    }
+
+    #[test]
+    fn csharp_operator_token_and_conversion_operator_names_are_stable() {
+        let units = analyze(
+            "cs",
+            "class Item { public static bool operator ==(Item left, Item right) => true; public static implicit operator Item(int value) => new(); }",
+        );
+        let symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Item.operator =="),
+            "symbols: {symbols:?}"
+        );
+        assert!(symbols.contains(&"Item.operator"), "symbols: {symbols:?}");
+    }
+
+    #[test]
+    fn csharp_properties_emit_accessors_or_expression_property_only() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "class C {\n",
+                "    int Value { get { if (ready) return 1; return 0; } set { if (value > 0) field = value; } }\n",
+                "    int Expression => ready ? 1 : 0;\n",
+                "}\n",
+            ),
+        );
+        let mut symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        symbols.sort_unstable();
+        assert_eq!(symbols, ["C.Expression", "C.Value.get", "C.Value.set"]);
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Value.get")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Value.set")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+        assert_eq!(
+            units
+                .iter()
+                .find(|unit| unit.symbol == "C.Expression")
+                .unwrap()
+                .complexity,
+            2.0
+        );
+    }
+
+    #[test]
+    fn csharp_switch_expression_counts_non_default_arms_and_guards() {
+        let units = analyze(
+            "cs",
+            "class C { int M(int x) => x switch { 0 => 10, 1 when x > 0 => 20, _ => 30 }; }",
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].complexity, 4.0);
+    }
+
+    #[test]
+    fn csharp_unguarded_switch_default_ignores_whitespace() {
+        for source in [
+            "class C { int M(int x) => x switch { 0 => 10, 1 => 20, _ => 30 }; }",
+            "class C { int M(int x) => x switch { 0=>10, 1=>20, _=>30 }; }",
+        ] {
+            let units = analyze("cs", source);
+            assert_eq!(units.len(), 1);
+            assert_eq!(units[0].complexity, 3.0);
+        }
+    }
+
+    #[test]
+    fn dart_top_level_functions_produce_codeunits() {
+        let units = analyze(
+            "dart",
+            "int add(int a, int b) { return a + b; }\nvoid greet(String name) { if (name != null) { print(name); } }\n",
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(symbols.contains(&"add"), "add not found in {symbols:?}");
+        assert!(symbols.contains(&"greet"), "greet not found in {symbols:?}");
+    }
+
+    #[test]
+    fn dart_adjacent_nested_and_initialized_callables_own_their_bodies() {
+        let source = concat!(
+            "void first(bool x) {\n",
+            "  void nested(bool y) { if (y) { while (y) {} } }\n",
+            "  final handler = (bool y) { if (y) {} };\n",
+            "  if (x) {}\n",
+            "}\n",
+            "void second(bool x) {\n",
+            "  if (x) { while (x) {} }\n",
+            "}\n",
+        );
+        let units = analyze("dart", source);
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.symbol.as_str(),
+                    unit.complexity,
+                    unit.start_line,
+                    unit.end_line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("first", 2.0, 1, 5),
+                ("nested", 3.0, 2, 2),
+                ("handler", 2.0, 3, 3),
+                ("second", 3.0, 6, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn dart_class_bodies_and_top_level_initializer_have_exact_units() {
+        let source = concat!(
+            "final handler = (bool x) { if (x) {} };\n",
+            "class Widget {\n",
+            "  Widget() { if (true) {} }\n",
+            "  factory Widget.make() { if (true) {} return Widget(); }\n",
+            "  int get value { if (true) return 1; return 0; }\n",
+            "  set value(int x) { if (x > 0) {} }\n",
+            "  void run(bool x) { if (x) { while (x) {} } }\n",
+            "}\n",
+        );
+        let units = analyze("dart", source);
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.symbol.as_str(),
+                    unit.complexity,
+                    unit.start_line,
+                    unit.end_line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("handler", 2.0, 1, 1),
+                ("Widget.Widget", 2.0, 3, 3),
+                ("Widget.Widget.make", 2.0, 4, 4),
+                ("Widget.value", 2.0, 5, 5),
+                ("Widget.value", 2.0, 6, 6),
+                ("Widget.run", 3.0, 7, 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn dart_declaration_initializer_forms_emit_one_callable() {
+        for (source, symbol) in [
+            ("var handler = (bool x) { if (x) {} };", "handler"),
+            ("Function handler = (bool x) { if (x) {} };", "handler"),
+            (
+                "class Widget { final handler = (bool x) { if (x) {} }; }",
+                "Widget.handler",
+            ),
+        ] {
+            let units = analyze("dart", source);
+            assert_eq!(units.len(), 1, "{source}");
+            assert_eq!(units[0].symbol, symbol);
+            assert_eq!(units[0].complexity, 2.0);
+        }
+    }
+
+    #[test]
+    fn vc4_dart_named_constructors_have_distinct_symbols() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Widget {\n",
+                "  Widget() {}\n",
+                "  Widget.named(bool ready) { if (ready) {} }\n",
+                "  factory Widget.make(bool ready) { if (ready) { while (ready) {} } return Widget(); }\n",
+                "}\n",
+            ),
+        );
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| (unit.symbol.as_str(), unit.complexity))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("Widget.Widget", 1.0),
+                ("Widget.Widget.named", 2.0),
+                ("Widget.Widget.make", 3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn dart_methods_produce_qualified_codeunits() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Calculator {\n",
+                "  int add(int a, int b) { return a + b; }\n",
+                "  int multiply(int a, int b) { return a * b; }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Calculator.add"),
+            "Calculator.add not found in {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"Calculator.multiply"),
+            "Calculator.multiply not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_getter_and_setter_produce_codeunits() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Counter {\n",
+                "  int _value = 0;\n",
+                "  int get value => _value;\n",
+                "  set value(int v) { _value = v; }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Counter.value"),
+            "Counter.value not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_constructor_produces_codeunit() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Point {\n",
+                "  int x, y;\n",
+                "  Point(this.x, this.y) {}\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Point.Point"),
+            "Point.Point not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_factory_constructor_produces_codeunit() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Logger {\n",
+                "  static Logger factory(String name) { return Logger(); }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Logger.factory"),
+            "Logger.factory not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_complexity_counts_correctly() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Validator {\n",
+                "  bool check(String input, bool strict) {\n",
+                "    if (input == null) return false;\n",
+                "    if (strict && input.isEmpty) return false;\n",
+                "    return true;\n",
+                "  }\n",
+                "}\n",
+            ),
+        );
+        let check = units.iter().find(|u| u.symbol == "Validator.check");
+        assert!(
+            check.is_some(),
+            "Validator.check not found; got {:?}",
+            units.iter().map(|u| u.symbol.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(check.unwrap().complexity, 4.0);
     }
 }
