@@ -21,14 +21,15 @@ pub enum Language {
     Java,
     #[value(name = "csharp", aliases = ["cs", "csx"])]
     CSharp,
-    #[value(name = "cpp", aliases = ["c", "c++"])]
+    C,
+    #[value(name = "cpp", alias = "c++")]
     Cpp,
     #[value(name = "dart", alias = "dart")]
     Dart,
 }
 
 impl Language {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::JavaScript,
         Self::TypeScript,
         Self::Python,
@@ -36,11 +37,12 @@ impl Language {
         Self::Rust,
         Self::Java,
         Self::CSharp,
+        Self::C,
         Self::Cpp,
         Self::Dart,
     ];
 
-    const NAMES: [&'static str; 9] = [
+    const NAMES: [&'static str; 10] = [
         "javascript",
         "typescript",
         "python",
@@ -48,11 +50,12 @@ impl Language {
         "rust",
         "java",
         "csharp",
+        "c",
         "cpp",
         "dart",
     ];
 
-    const ALIASES: [(&'static str, Self); 15] = [
+    const ALIASES: [(&'static str, Self); 17] = [
         ("javascript", Self::JavaScript),
         ("js", Self::JavaScript),
         ("typescript", Self::TypeScript),
@@ -65,12 +68,14 @@ impl Language {
         ("java", Self::Java),
         ("csharp", Self::CSharp),
         ("cs", Self::CSharp),
+        ("csx", Self::CSharp),
+        ("cpp", Self::Cpp),
         ("c++", Self::Cpp),
-        ("c", Self::Cpp),
+        ("c", Self::C),
         ("dart", Self::Dart),
     ];
 
-    const EXTENSIONS: [(&'static [&'static str], Self); 9] = [
+    const EXTENSIONS: [(&'static [&'static str], Self); 10] = [
         (&["js", "jsx", "mjs", "cjs"], Self::JavaScript),
         (&["ts", "tsx", "mts", "cts"], Self::TypeScript),
         (&["py"], Self::Python),
@@ -78,7 +83,8 @@ impl Language {
         (&["rs"], Self::Rust),
         (&["java"], Self::Java),
         (&["cs", "csx"], Self::CSharp),
-        (&["c", "cpp", "cc", "cxx", "h", "hpp"], Self::Cpp),
+        (&["c"], Self::C),
+        (&["cpp", "cc", "cxx", "h", "hpp"], Self::Cpp),
         (&["dart"], Self::Dart),
     ];
 
@@ -218,11 +224,35 @@ mod tests {
     }
 
     #[test]
+    fn ten_language_catalog_is_aligned() {
+        let names = [
+            "javascript",
+            "typescript",
+            "python",
+            "go",
+            "rust",
+            "java",
+            "csharp",
+            "c",
+            "cpp",
+            "dart",
+        ];
+        assert_eq!(Language::ALL.len(), names.len());
+        for (index, language) in Language::ALL.iter().enumerate() {
+            assert_eq!(language.index(), index);
+            assert_eq!(language.as_str(), names[index]);
+            assert_eq!(names[index].parse::<Language>(), Ok(*language));
+            assert_eq!(serde_json::to_value(language).unwrap(), names[index]);
+        }
+        assert_eq!("csx".parse::<Language>(), Ok(Language::CSharp));
+    }
+
+    #[test]
     fn from_path_detects_new_language_extensions() {
         let cases = [
             ("sample.cs", Language::CSharp),
             ("sample.csx", Language::CSharp),
-            ("sample.c", Language::Cpp),
+            ("sample.c", Language::C),
             ("sample.cpp", Language::Cpp),
             ("sample.cc", Language::Cpp),
             ("sample.cxx", Language::Cpp),
@@ -256,8 +286,10 @@ mod tests {
             ("java", Language::Java),
             ("csharp", Language::CSharp),
             ("cs", Language::CSharp),
+            ("csx", Language::CSharp),
+            ("cpp", Language::Cpp),
             ("c++", Language::Cpp),
-            ("c", Language::Cpp),
+            ("c", Language::C),
             ("dart", Language::Dart),
         ];
 

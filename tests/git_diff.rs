@@ -135,6 +135,31 @@ fn reports_only_the_changed_function_and_gates_it() {
 }
 
 #[test]
+fn dart_body_only_change_retains_its_callable() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    let source = dir.path().join("app.dart");
+    let original = concat!(
+        "void edited(bool x) {\n",
+        "  if (x) {\n",
+        "    print(1);\n",
+        "  }\n",
+        "}\n",
+        "void untouched() {}\n",
+    );
+    write(&source, original);
+    commit_all(dir.path(), "base");
+    git(dir.path(), &["checkout", "-b", "topic"]);
+    write(&source, &original.replace("print(1)", "print(2)"));
+    let report = json_report(dir.path(), &[]);
+    assert_eq!(symbols(&report), ["edited"]);
+    assert_eq!(report["entries"][0]["language"], "dart");
+    assert_eq!(report["entries"][0]["start_line"], 1);
+    assert_eq!(report["entries"][0]["end_line"], 5);
+    assert_eq!(report["entries"][0]["complexity"], 2.0);
+}
+
+#[test]
 fn includes_committed_staged_unstaged_and_untracked_work() {
     let dir = tempfile::tempdir().unwrap();
     init(dir.path());

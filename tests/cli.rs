@@ -716,6 +716,68 @@ fn csharp_language_produces_codeunits() {
 }
 
 #[test]
+fn ten_languages_are_enabled_by_default_and_aliases_select_canonically() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixtures = [
+        ("app.js", "function run() {}", "javascript"),
+        ("app.ts", "function run(): void {}", "typescript"),
+        ("app.py", "def run():\n    pass\n", "python"),
+        ("app.go", "package p\nfunc run() {}", "go"),
+        ("app.rs", "fn run() {}", "rust"),
+        ("App.java", "class App { void run() {} }", "java"),
+        ("app.csx", "class App { void Run() {} }", "csharp"),
+        ("app.c", "int new(void) { return 0; }", "c"),
+        ("app.cpp", "void run() {}", "cpp"),
+        ("app.dart", "void run() {}", "dart"),
+    ];
+    for (file, source, _) in fixtures {
+        write(&dir.path().join(file), source);
+    }
+    let output = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let mut languages: Vec<_> = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["language"].as_str().unwrap())
+        .collect();
+    languages.sort_unstable();
+    let mut expected: Vec<_> = fixtures.iter().map(|(_, _, language)| *language).collect();
+    expected.sort_unstable();
+    assert_eq!(languages, expected);
+    assert_eq!(report["diagnostics"]["warning_count"], 0);
+
+    for (alias, canonical) in [
+        ("c", "c"),
+        ("cpp", "cpp"),
+        ("c++", "cpp"),
+        ("csx", "csharp"),
+    ] {
+        let output = poly_crap()
+            .arg("--path")
+            .arg(dir.path())
+            .args(["--format", "json", "--language", alias])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let report: Value = serde_json::from_slice(&output).unwrap();
+        let entries = report["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{alias}");
+        assert_eq!(entries[0]["language"], canonical);
+    }
+}
+
+#[test]
 fn csharp_cli_with_cpp_and_dart_works() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -760,6 +822,98 @@ fn csharp_cli_with_cpp_and_dart_works() {
     assert!(languages.contains(&"csharp"));
     assert!(languages.contains(&"cpp"));
     assert!(languages.contains(&"dart"));
+}
+
+#[test]
+fn new_languages_absolute_and_delta_reports_match_schemas() {
+    let dir = tempfile::tempdir().unwrap();
+    for (file, source) in [
+        ("app.c", "int new(void) { return 0; }"),
+        ("app.cpp", "void run() {}"),
+        ("app.cs", "class App { void Run() {} }"),
+        ("app.dart", "void run() {}"),
+    ] {
+        write(&dir.path().join(file), source);
+    }
+
+    let baseline = dir.path().join("baseline.json");
+    let absolute = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    fs::write(&baseline, &absolute).unwrap();
+    let delta = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .arg("--baseline")
+        .arg(&baseline)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    for (bytes, schema) in [
+        (&absolute, include_str!("../schemas/report-v1.json")),
+        (&delta, include_str!("../schemas/delta-v1.json")),
+    ] {
+        let report: Value = serde_json::from_slice(bytes).unwrap();
+        let schema: Value = serde_json::from_str(schema).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&report), "{report}");
+        let mut languages: Vec<_> = report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["language"].as_str().unwrap())
+            .collect();
+        languages.sort_unstable();
+        assert_eq!(languages, ["c", "cpp", "csharp", "dart"]);
+    }
+}
+
+#[test]
+fn dart_body_line_coverage_uses_complete_callable_span() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("app.dart");
+    write(
+        &source,
+        "void run(bool x) {\n  if (x) {\n    print(x);\n  }\n}\n",
+    );
+    let coverage = dir.path().join("coverage.lcov");
+    write(
+        &coverage,
+        &format!("SF:{}\nDA:2,1\nDA:3,0\nend_of_record\n", source.display()),
+    );
+    let output = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .arg("--coverage")
+        .arg(&coverage)
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["symbol"], "run");
+    assert_eq!(entries[0]["start_line"], 1);
+    assert_eq!(entries[0]["end_line"], 5);
+    assert_eq!(entries[0]["complexity"], 2.0);
+    assert_eq!(entries[0]["coverage"], 50.0);
+    assert_eq!(entries[0]["score"], 2.5);
+    assert_eq!(
+        entries[0]["uncovered"],
+        serde_json::json!([{"start":3,"end":3}])
+    );
 }
 
 #[test]
