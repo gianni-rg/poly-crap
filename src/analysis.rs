@@ -435,7 +435,7 @@ fn declared_unit<'tree>(
     language: Language,
     source: &[u8],
 ) -> Option<(Node<'tree>, String)> {
-    if is_bodyless_java_declaration(node, language) {
+    if is_bodyless_declaration(node, language) {
         return None;
     }
     if language == Language::CSharp && is_non_callable_csharp(node) {
@@ -459,7 +459,23 @@ fn is_bodyless_java_declaration(node: Node<'_>, language: Language) -> bool {
     language == Language::Java && node.child_by_field_name("body").is_none()
 }
 
+fn is_bodyless_declaration(node: Node<'_>, language: Language) -> bool {
+    is_bodyless_java_declaration(node, language)
+        || (language == Language::CSharp
+            && matches!(
+                node.kind(),
+                "method_declaration" | "local_function_statement"
+            )
+            && node.child_by_field_name("body").is_none())
+}
+
 fn declared_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if matches!(
+        node.kind(),
+        "constructor_signature" | "factory_constructor_signature"
+    ) {
+        return dart_constructor_name(node, source);
+    }
     // For C# conversion operators (implicit/explicit operator), there is no 'name' field;
     // the method name is always "operator". Return that so the caller can build "ClassName.operator".
     if node.kind() == "conversion_operator_declaration" {
@@ -484,6 +500,16 @@ fn declared_name(node: Node<'_>, source: &[u8]) -> Option<String> {
         })
         .and_then(|name| text(name, source))
         .map(str::to_string)
+}
+
+fn dart_constructor_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let names: Vec<_> = node
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "identifier")
+        .filter_map(|child| text(child, source))
+        .collect();
+    (!names.is_empty()).then(|| names.join("."))
 }
 
 fn operator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -743,12 +769,35 @@ fn java_parameter_types(parameters: Node<'_>, source: &[u8]) -> Vec<String> {
 }
 
 fn qualify_symbol(node: Node<'_>, language: Language, name: &str, source: &[u8]) -> String {
-    let mut parts = container_parts(node, language, source);
+    let mut parts = csharp_file_scoped_namespace(node, language, source)
+        .into_iter()
+        .collect::<Vec<_>>();
+    parts.extend(container_parts(node, language, source));
     if let Some(receiver) = go_receiver_name(node, language, source) {
         parts.push(receiver);
     }
     parts.push(name.to_string());
     parts.join(SYMBOL_SEPARATORS[language.index()])
+}
+
+fn csharp_file_scoped_namespace(
+    node: Node<'_>,
+    language: Language,
+    source: &[u8],
+) -> Option<String> {
+    if language != Language::CSharp {
+        return None;
+    }
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .find(|child| child.kind() == "file_scoped_namespace_declaration")
+        .and_then(|namespace| namespace.child_by_field_name("name"))
+        .and_then(|name| text(name, source))
+        .map(str::to_string)
 }
 
 const SYMBOL_SEPARATORS: [&str; 10] = [".", ".", ".", ".", "::", ".", ".", "::", "::", "."];
@@ -796,6 +845,7 @@ fn is_container(kind: &str) -> bool {
             | "constructor_declaration"
             | "accessor_declaration"
             | "property_declaration"
+            | "file_scoped_namespace_declaration"
     )
 }
 
@@ -818,6 +868,10 @@ fn container_name(node: Node<'_>, language: Language, source: &[u8]) -> Option<S
     }
     let name_node = node
         .child_by_field_name("name")
+        .or_else(|| {
+            node.child_by_field_name("declarator")
+                .and_then(declarator_name)
+        })
         .or_else(|| assigned_class_name(node, language))
         .or_else(|| {
             // C/C++ class_specifier stores the class name as a type_identifier
@@ -999,7 +1053,9 @@ fn is_simple_decision(node: Node<'_>) -> bool {
                 | "elif_clause"
                 | "if_expression"
                 | "for_statement"
+                | "foreach_statement"
                 | "for_in_statement"
+                | "for_range_loop"
                 | "while_statement"
                 | "while_expression"
                 | "do_statement"
@@ -1032,6 +1088,7 @@ fn is_arm_decision(kind: &str) -> bool {
     matches!(
         kind,
         "switch_case"
+            | "case_statement"
             | "expression_case"
             | "type_case"
             | "communication_case"
@@ -1440,6 +1497,63 @@ mod tests {
     }
 
     #[test]
+    fn vc3_cpp_lambdas_include_enclosing_function_names() {
+        let units = analyze(
+            "cpp",
+            concat!(
+                "namespace ns {\n",
+                "void first() { auto handler = [](bool x) { if (x) {} }; }\n",
+                "void second() { auto handler = [](bool x) { if (x) { while (x) {} } }; }\n",
+                "}\n",
+            ),
+        );
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| (unit.symbol.as_str(), unit.complexity))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("ns::first", 1.0),
+                ("ns::first::handler", 2.0),
+                ("ns::second", 1.0),
+                ("ns::second::handler", 3.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn vc3_cpp_range_loop_counts_as_one_decision() {
+        let units = analyze(
+            "cpp",
+            "int sum(int (&values)[3]) { int total = 0; for (int value : values) { total += value; } return total; }",
+        );
+        assert_eq!(symbols(&units), ["sum"]);
+        assert_eq!(units[0].complexity, 2.0);
+    }
+
+    #[test]
+    fn vc3_c_and_cpp_switch_cases_exclude_default_labels() {
+        for language in ["c", "cpp"] {
+            for (body, complexity) in [
+                (
+                    "case 1: return 1; case 2: return 2; default: return 0;",
+                    3.0,
+                ),
+                ("case 1: case 2: return 1; default: return 0;", 3.0),
+                ("default: return 0;", 1.0),
+            ] {
+                let units = analyze(
+                    language,
+                    &format!("int pick(int x) {{ switch (x) {{ {body} }} }}"),
+                );
+                assert_eq!(symbols(&units), ["pick"], "{language}");
+                assert_eq!(units[0].complexity, complexity, "{language}: {body}");
+            }
+        }
+    }
+
+    #[test]
     fn cpp_preprocessor_is_not_counted_as_decision() {
         let units = analyze(
             "cpp",
@@ -1502,7 +1616,7 @@ mod tests {
                 "}\n",
             ),
         );
-        assert_eq!(symbols(&units), ["outer", "handler"]);
+        assert_eq!(symbols(&units), ["outer", "outer::handler"]);
         assert_eq!(
             units.iter().map(|unit| unit.complexity).collect::<Vec<_>>(),
             [2.0, 2.0]
@@ -1624,6 +1738,61 @@ mod tests {
                 ("MyApp.Service.Service", 5, 5, 1.0),
             ]
         );
+    }
+
+    #[test]
+    fn vc2_csharp_bodyless_methods_are_not_codeunits() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "interface I { void Contract(); }\n",
+                "abstract class Base { public abstract void Abstract(); public partial void Partial(); }\n",
+                "class C : Base { public override void Abstract() {} public partial void Partial() {} public void Expression() => Work(); }\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            ["C.Abstract", "C.Partial", "C.Expression"],
+            "only implemented C# methods are executable units"
+        );
+    }
+
+    #[test]
+    fn vc2_csharp_file_scoped_namespace_qualifies_types_and_nested_callables() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "namespace MyApp.Services;\n",
+                "class Service {\n",
+                "    void Register() { void Local() {} }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|unit| unit.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            [
+                "MyApp.Services.Service.Register",
+                "MyApp.Services.Service.Register.Local"
+            ]
+        );
+    }
+
+    #[test]
+    fn vc2_csharp_foreach_and_await_foreach_count_as_decisions() {
+        let units = analyze(
+            "cs",
+            concat!(
+                "class C {\n",
+                "    void Each(System.Collections.Generic.IEnumerable<int> items) { foreach (var item in items) { } }\n",
+                "    async System.Threading.Tasks.Task AwaitEach(System.Collections.Generic.IAsyncEnumerable<int> items) { await foreach (var item in items) { } }\n",
+                "}\n",
+            ),
+        );
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].complexity, 2.0);
+        assert_eq!(units[1].complexity, 2.0);
     }
 
     #[test]
@@ -1963,7 +2132,7 @@ mod tests {
             [
                 ("handler", 2.0, 1, 1),
                 ("Widget.Widget", 2.0, 3, 3),
-                ("Widget.Widget", 2.0, 4, 4),
+                ("Widget.Widget.make", 2.0, 4, 4),
                 ("Widget.value", 2.0, 5, 5),
                 ("Widget.value", 2.0, 6, 6),
                 ("Widget.run", 3.0, 7, 7),
@@ -1986,6 +2155,32 @@ mod tests {
             assert_eq!(units[0].symbol, symbol);
             assert_eq!(units[0].complexity, 2.0);
         }
+    }
+
+    #[test]
+    fn vc4_dart_named_constructors_have_distinct_symbols() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Widget {\n",
+                "  Widget() {}\n",
+                "  Widget.named(bool ready) { if (ready) {} }\n",
+                "  factory Widget.make(bool ready) { if (ready) { while (ready) {} } return Widget(); }\n",
+                "}\n",
+            ),
+        );
+        let actual: Vec<_> = units
+            .iter()
+            .map(|unit| (unit.symbol.as_str(), unit.complexity))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("Widget.Widget", 1.0),
+                ("Widget.Widget.named", 2.0),
+                ("Widget.Widget.make", 3.0),
+            ]
+        );
     }
 
     #[test]

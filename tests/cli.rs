@@ -166,6 +166,142 @@ fn excluded_test_files_in_coverage_are_not_coverage_only() {
 }
 
 #[test]
+fn vc4_dart_named_constructors_keep_baseline_scores_after_line_shift() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("app.dart");
+    let original = concat!(
+        "class Widget {\n",
+        "  Widget() {}\n",
+        "  Widget.named(bool ready) { if (ready) {} }\n",
+        "  factory Widget.make(bool ready) { if (ready) { while (ready) {} } return Widget(); }\n",
+        "}\n",
+    );
+    write(&source, original);
+    let baseline = dir.path().join("baseline.json");
+    poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .arg("--output")
+        .arg(&baseline)
+        .assert()
+        .success();
+    write(&source, &format!("\n{original}"));
+    let output = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .arg("--baseline")
+        .arg(&baseline)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(report["removed"].as_array().unwrap().is_empty());
+    for (symbol, score) in [
+        ("Widget.Widget", 2.0),
+        ("Widget.Widget.named", 6.0),
+        ("Widget.Widget.make", 12.0),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["symbol"] == symbol)
+            .unwrap();
+        assert_eq!(entry["status"], "unchanged");
+        assert_eq!(entry["score"], score);
+        assert_eq!(entry["baseline_score"], score);
+        assert_eq!(entry["delta"], 0.0);
+    }
+}
+
+#[test]
+fn vc3_cpp_lambda_baselines_stay_unchanged_after_line_shift() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("app.cpp");
+    let original = concat!(
+        "void first() { auto handler = [](bool x) { if (x) {} }; }\n",
+        "void second() { auto handler = [](bool x) { if (x) { while (x) {} } }; }\n",
+    );
+    write(&source, original);
+    let baseline = dir.path().join("baseline.json");
+    poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .arg("--output")
+        .arg(&baseline)
+        .assert()
+        .success();
+    write(&source, &format!("\n{original}"));
+    let output = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .arg("--baseline")
+        .arg(&baseline)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    assert!(report["removed"].as_array().unwrap().is_empty());
+    assert!(entries.iter().all(|entry| entry["status"] == "unchanged"));
+    for (symbol, score) in [("first::handler", 6.0), ("second::handler", 12.0)] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["symbol"] == symbol)
+            .unwrap();
+        assert_eq!(entry["score"], score);
+        assert_eq!(entry["baseline_score"], score);
+        assert_eq!(entry["delta"], 0.0);
+    }
+}
+
+#[test]
+fn vc3_c_and_cpp_decisions_have_exact_cli_scores() {
+    let dir = tempfile::tempdir().unwrap();
+    let switch = "int pick(int x) { switch (x) { case 1: return 1; case 2: return 2; default: return 0; } }\n";
+    write(&dir.path().join("app.c"), switch);
+    write(
+        &dir.path().join("app.cpp"),
+        &format!(
+            "{switch}int sum(int (&values)[3]) {{ int total = 0; for (int value : values) {{ total += value; }} return total; }}\n"
+        ),
+    );
+    let output = poly_crap()
+        .arg("--path")
+        .arg(dir.path())
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    for (language, symbol, complexity, score) in [
+        ("c", "pick", 3.0, 12.0),
+        ("cpp", "pick", 3.0, 12.0),
+        ("cpp", "sum", 2.0, 6.0),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["language"] == language && entry["symbol"] == symbol)
+            .unwrap();
+        assert_eq!(entry["complexity"], complexity, "{language}: {symbol}");
+        assert_eq!(entry["score"], score, "{language}: {symbol}");
+    }
+}
+
+#[test]
 fn baseline_delta_matches_schema_and_can_fail() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("app.py");
@@ -527,6 +663,70 @@ fn allow_path_globs_suppress_reported_entries() {
         .map(|entry| entry["symbol"].as_str().unwrap())
         .collect();
     assert_eq!(symbols, ["kept"], "{report}");
+}
+
+#[test]
+fn vc2_csharp_cli_allow_matches_file_namespace_and_foreach_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("Service.cs");
+    write(
+        &source,
+        "namespace MyApp;\nclass Service {\n    void Each(System.Collections.Generic.IEnumerable<int> items) { foreach (var item in items) { } }\n    void Plain() { }\n}\n",
+    );
+    let coverage = dir.path().join("coverage.info");
+    write(
+        &coverage,
+        &format!(
+            "SF:{}\nDA:1,0\nDA:2,0\nDA:3,0\nDA:4,0\nDA:5,0\nend_of_record\n",
+            source.display()
+        ),
+    );
+    let scored = poly_crap()
+        .args([
+            "--path",
+            dir.path().to_str().unwrap(),
+            "--coverage",
+            coverage.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        scored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scored.stderr)
+    );
+    let report: Value = serde_json::from_slice(&scored.stdout).unwrap();
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{report}");
+    let each = entries
+        .iter()
+        .find(|entry| entry["symbol"] == "MyApp.Service.Each")
+        .unwrap();
+    assert_eq!(each["score"], 6.0);
+
+    let allowed = poly_crap()
+        .args([
+            "--path",
+            dir.path().to_str().unwrap(),
+            "--coverage",
+            coverage.to_str().unwrap(),
+            "--allow",
+            "MyApp.Service.Each",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&allowed.stdout).unwrap();
+    let symbols: Vec<_> = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(symbols, ["MyApp.Service.Plain"], "{report}");
 }
 
 #[test]
