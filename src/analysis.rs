@@ -304,19 +304,25 @@ fn collect_units<'tree>(
         if attributes.skips(child, source) {
             continue;
         }
-        // Also check if this node is a variable declarator / assignment site
-        // and push the assigned callable as a CodeUnit.
-        if language == Language::CSharp {
-            if let Some((callable_node, callable_name)) = assigned_callable(child, language, source)
-            {
-                let name = callable_name.clone();
-                output.push(UnitSpec {
-                    node: callable_node,
-                    name,
-                });
-            }
-        }
+        record_unit(child, language, source, output);
         collect_units(child, language, source, output);
+    }
+}
+
+/// Push a C# assigned callable (e.g. `var handler = ...`) as a CodeUnit.
+fn record_unit<'tree>(
+    child: Node<'tree>,
+    language: Language,
+    source: &[u8],
+    output: &mut Vec<UnitSpec<'tree>>,
+) {
+    if language == Language::CSharp {
+        if let Some((callable_node, callable_name)) = assigned_callable(child, language, source) {
+            output.push(UnitSpec {
+                node: callable_node,
+                name: callable_name.clone(),
+            });
+        }
     }
 }
 
@@ -828,16 +834,14 @@ fn complexity(root: Node<'_>, source: &[u8]) -> usize {
 }
 
 fn count_decisions(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
-    // Dart's callable nodes (function_signature, method_signature) don't
-    // contain statements directly; the body lives inside a `function_body`
-    // node attached to the same parent wrapper.
-    // Descend into it before we short-circuit on `is_callable`.
     if is_dart_callable(node.kind()) {
-        if let Some(body) = dart_body(node) {
-            count_decisions(body, root, source, count);
-        }
-        return;
+        return count_dart_body(node, root, source, count);
     }
+    walk_and_count(node, root, source, count);
+}
+
+/// Walk a node and all its descendants, counting decision points.
+fn walk_and_count(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
     if node != root && is_callable(node.kind()) {
         return;
     }
@@ -846,14 +850,21 @@ fn count_decisions(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut us
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        count_decisions(child, root, source, count);
+        walk_and_count(child, root, source, count);
+    }
+}
+
+/// For a Dart callable node, walk its `function_body` instead of descending
+/// into child nodes (tree-sitter-dart places the body inside a separate node).
+fn count_dart_body(callable: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
+    if let Some(body) = dart_body(callable) {
+        walk_and_count(body, root, source, count);
     }
 }
 
 /// Return the `function_body` node that belongs to a Dart callable.
-/// tree-sitter-dart attaches it as a sibling under the same parent.
+/// tree-sitter-dart attaches it as a `body` field under the same parent.
 fn dart_body(callable: Node<'_>) -> Option<Node<'_>> {
-    // Walk up to find a parent that owns a `function_body`.
     let mut ancestor = callable.parent();
     while let Some(parent) = ancestor {
         if let Some(body) = parent.child_by_field_name("body") {
@@ -861,19 +872,7 @@ fn dart_body(callable: Node<'_>) -> Option<Node<'_>> {
                 return Some(body);
             }
         }
-        let mut cursor = parent.walk();
-        for child in parent.named_children(&mut cursor) {
-            if child.kind() == "function_body" {
-                return Some(child);
-            }
-        }
         ancestor = parent.parent();
-    }
-    // Sibling `function_body` (e.g. top-level function).
-    if let Some(body) = callable.next_sibling() {
-        if body.kind() == "function_body" {
-            return Some(body);
-        }
     }
     None
 }
