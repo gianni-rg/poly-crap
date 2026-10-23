@@ -725,6 +725,7 @@ fn is_container(kind: &str) -> bool {
             | "interface_declaration"
             | "enum_declaration"
             | "record_declaration"
+            | "struct_declaration"
             | "trait_item"
             | "impl_item"
             | "mod_item"
@@ -827,6 +828,16 @@ fn complexity(root: Node<'_>, source: &[u8]) -> usize {
 }
 
 fn count_decisions(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut usize) {
+    // Dart's callable nodes (function_signature, method_signature) don't
+    // contain statements directly; the body lives inside a `function_body`
+    // node attached to the same parent wrapper.
+    // Descend into it before we short-circuit on `is_callable`.
+    if is_dart_callable(node.kind()) {
+        if let Some(body) = dart_body(node) {
+            count_decisions(body, root, source, count);
+        }
+        return;
+    }
     if node != root && is_callable(node.kind()) {
         return;
     }
@@ -837,6 +848,46 @@ fn count_decisions(node: Node<'_>, root: Node<'_>, source: &[u8], count: &mut us
     for child in node.named_children(&mut cursor) {
         count_decisions(child, root, source, count);
     }
+}
+
+/// Return the `function_body` node that belongs to a Dart callable.
+/// tree-sitter-dart attaches it as a sibling under the same parent.
+fn dart_body(callable: Node<'_>) -> Option<Node<'_>> {
+    // Walk up to find a parent that owns a `function_body`.
+    let mut ancestor = callable.parent();
+    while let Some(parent) = ancestor {
+        if let Some(body) = parent.child_by_field_name("body") {
+            if body.kind() == "function_body" {
+                return Some(body);
+            }
+        }
+        let mut cursor = parent.walk();
+        for child in parent.named_children(&mut cursor) {
+            if child.kind() == "function_body" {
+                return Some(child);
+            }
+        }
+        ancestor = parent.parent();
+    }
+    // Sibling `function_body` (e.g. top-level function).
+    if let Some(body) = callable.next_sibling() {
+        if body.kind() == "function_body" {
+            return Some(body);
+        }
+    }
+    None
+}
+
+fn is_dart_callable(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_signature"
+            | "method_signature"
+            | "getter_signature"
+            | "setter_signature"
+            | "constructor_signature"
+            | "factory_constructor_signature"
+    )
 }
 
 fn is_callable(kind: &str) -> bool {
@@ -907,6 +958,12 @@ fn is_simple_decision(node: Node<'_>) -> bool {
                 | "for_in_clause"
                 | "if_clause"
                 | "goto_statement"
+                // Dart uses flat node kinds for control flow.
+                | "if"
+                | "for"
+                | "while"
+                | "do"
+                | "switch"
         )
 }
 
@@ -954,6 +1011,10 @@ fn is_boolean_decision(node: Node<'_>, source: &[u8]) -> bool {
     matches!(
         node.kind(),
         "binary_expression" | "boolean_operator" | "let_chain"
+            // Dart: `logical_and_expression` / `logical_or_expression` embed the
+            // operator in text rather than as a named child.
+            | "logical_and_expression"
+            | "logical_or_expression"
     ) && has_boolean_operator(node, source)
 }
 
@@ -1510,5 +1571,115 @@ mod tests {
             units.iter().any(|u| u.symbol.contains("_fn")),
             "field _fn not found in {symbols:?}"
         );
+    }
+
+    #[test]
+    fn dart_top_level_functions_produce_codeunits() {
+        let units = analyze(
+            "dart",
+            "int add(int a, int b) { return a + b; }\nvoid greet(String name) { if (name != null) { print(name); } }\n",
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(symbols.contains(&"add"), "add not found in {symbols:?}");
+        assert!(symbols.contains(&"greet"), "greet not found in {symbols:?}");
+    }
+
+    #[test]
+    fn dart_methods_produce_qualified_codeunits() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Calculator {\n",
+                "  int add(int a, int b) { return a + b; }\n",
+                "  int multiply(int a, int b) { return a * b; }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Calculator.add"),
+            "Calculator.add not found in {symbols:?}"
+        );
+        assert!(
+            symbols.contains(&"Calculator.multiply"),
+            "Calculator.multiply not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_getter_and_setter_produce_codeunits() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Counter {\n",
+                "  int _value = 0;\n",
+                "  int get value => _value;\n",
+                "  set value(int v) { _value = v; }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Counter.value"),
+            "Counter.value not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_constructor_produces_codeunit() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Point {\n",
+                "  int x, y;\n",
+                "  Point(this.x, this.y) {}\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Point.Point"),
+            "Point.Point not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_factory_constructor_produces_codeunit() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Logger {\n",
+                "  static Logger factory(String name) { return Logger(); }\n",
+                "}\n",
+            ),
+        );
+        let symbols: Vec<_> = units.iter().map(|u| u.symbol.as_str()).collect();
+        assert!(
+            symbols.contains(&"Logger.factory"),
+            "Logger.factory not found in {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn dart_complexity_counts_correctly() {
+        let units = analyze(
+            "dart",
+            concat!(
+                "class Validator {\n",
+                "  bool check(String input, bool strict) {\n",
+                "    if (input == null) return false;\n",
+                "    if (strict && input.isEmpty) return false;\n",
+                "    return true;\n",
+                "  }\n",
+                "}\n",
+            ),
+        );
+        let check = units.iter().find(|u| u.symbol == "Validator.check");
+        assert!(
+            check.is_some(),
+            "Validator.check not found; got {:?}",
+            units.iter().map(|u| u.symbol.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(check.unwrap().complexity, 4.0);
     }
 }
